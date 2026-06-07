@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+!.env.vercel.example
+data/
+__pycache__/
+*.pyc
+.vercel/
+.claude/
+flask_run.log
+alphacore_model.pkl
+*.pkl
+static/screenshot_*.png
+polymarket-arb-bot/
+node_modules/

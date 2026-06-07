@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ config.DASHBOARD_BRAND_NAME }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <!-- Chart.js for analytics panels -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script defer src="{{ url_for('static', filename='metamask.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">RT</span>
+      <div>
+        <strong>{{ config.DASHBOARD_BRAND_NAME }}</strong>
+        <span>{{ config.TRADING_MODE|upper }} mode</span>
+      </div>
+    </div>
+    {% if session.get("logged_in") %}
+      <nav class="topnav">
+        <a href="#overview">Overview</a>
+        <a href="#analytics">Analytics</a>
+        <a href="#ai-research">AI Research</a>
+        <a href="#controls">Controls</a>
+        <a href="#positions">Positions</a>
+        <a href="#signals">Signals</a>
+        <a href="#trades">Trades</a>
+      </nav>
+      <form method="post" action="{{ url_for('logout') }}">
+        <button class="ghost" type="submit">Logout</button>
+      </form>
+    {% endif %}
+  </header>
+
+  <main class="page">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-stack">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Login - {{ config.DASHBOARD_BRAND_NAME }}{% endblock %}
+
+{% block content %}
+<section class="login-shell">
+  <form class="login-panel" method="post">
+    <div class="login-brand">
+      <span class="brand-mark large">RT</span>
+      <div>
+        <h1>{{ config.DASHBOARD_BRAND_NAME }}</h1>
+        <p>Secure trading operations dashboard</p>
+      </div>
+    </div>
+    <label>
+      Username
+      <input name="username" autocomplete="username" required>
+    </label>
+    <label>
+      Password
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Login</button>
+    <div class="login-meta">
+      <span>{{ config.TRADING_MODE|upper }}</span>
+      <span>{{ config.DATABASE_LABEL }} storage</span>
+    </div>
+  </form>
+</section>
+{% endblock %}

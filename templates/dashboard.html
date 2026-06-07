@@ -1,0 +1,829 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if connection_error %}
+  <div class="notice error">{{ connection_error }}</div>
+{% endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  HERO                                                                  -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="dashboard-hero" id="overview">
+  <div>
+    <p class="eyebrow">Trading Operations Center</p>
+    <h1>{{ config.DASHBOARD_BRAND_NAME }}</h1>
+    <p class="hero-copy">Multi-agent AI research · Signal intelligence engine · 5:1 risk-reward enforcement</p>
+  </div>
+  <div class="hero-status">
+    <span class="status-chip {{ 'chip-good' if clock and clock.is_open else 'chip-bad' }}">
+      <span class="live-dot {{ 'dot-green' if clock and clock.is_open else 'dot-red' }}"></span>
+      Market {{ "Open" if clock and clock.is_open else "Closed" }}
+    </span>
+    <span class="status-chip {{ 'chip-good' if agent.running else 'chip-muted' }}">
+      <span class="live-dot {{ 'dot-green' if agent.running else 'dot-gray' }}"></span>
+      Bot {{ "Running" if agent.running else "Stopped" }}
+    </span>
+    <span class="status-chip chip-muted">{{ config.DATABASE_LABEL }} DB</span>
+    <span class="status-chip chip-muted" id="last-refresh">Live</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  KEY METRICS                                                            -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="metrics">
+  <div class="metric">
+    <span class="metric-label">Portfolio</span>
+    <strong class="metric-value" id="m-portfolio">
+      {% if account %}${{ "%.2f"|format(account.portfolio_value|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="metric-sub">Total value</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Cash</span>
+    <strong class="metric-value" id="m-cash">
+      {% if account %}${{ "%.2f"|format(account.cash|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="metric-sub">Available</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Buying Power</span>
+    <strong class="metric-value" id="m-bp">
+      {% if account %}${{ "%.2f"|format(account.buying_power|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="metric-sub">Alpaca</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Unrealized P&amp;L</span>
+    <strong class="metric-value" id="m-upl">
+      {% set ns = namespace(upl=0.0) %}
+      {% for p in positions %}{% set ns.upl = ns.upl + p.unrealized_pl|float %}{% endfor %}
+      <span class="{{ 'good' if ns.upl >= 0 else 'bad' }}">
+        ${{ "%.2f"|format(ns.upl) }}
+      </span>
+    </strong>
+    <span class="metric-sub">Open positions</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Market</span>
+    <strong class="metric-value {{ 'good' if clock and clock.is_open else 'bad' }}">
+      {{ "OPEN" if clock and clock.is_open else "CLOSED" }}
+    </strong>
+    <span class="metric-sub">NYSE/NASDAQ</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Trades Today</span>
+    <strong class="metric-value">{{ summary.total or 0 }}</strong>
+    <span class="metric-sub">Captured events</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Total Signals</span>
+    <strong class="metric-value">{{ signal_summary.total or 0 }}</strong>
+    <span class="metric-sub">Signal engine</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Approved</span>
+    <strong class="metric-value good">{{ signal_summary.approved or 0 }}</strong>
+    <span class="metric-sub">Passed threshold</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Avg Confidence</span>
+    <strong class="metric-value">
+      {% if signal_summary.avg_confidence %}
+        {{ "%.0f"|format(signal_summary.avg_confidence|float) }}<span style="font-size:14px;color:var(--muted)">/100</span>
+      {% else %}—{% endif %}
+    </strong>
+    <span class="metric-sub">Signal score</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  ANALYTICS CHARTS                                                       -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="charts-row" id="analytics">
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Signal Confidence Trend</h2>
+      <span class="pill chip-muted">Last 30 signals</span>
+    </div>
+    <div class="chart-body">
+      <canvas id="confidenceChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Signal Direction Split</h2>
+      <span class="pill chip-muted">All time</span>
+    </div>
+    <div class="chart-body chart-body--sm">
+      <canvas id="directionChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Approval Rate</h2>
+      <span class="pill chip-muted">Approved vs Rejected</span>
+    </div>
+    <div class="chart-body chart-body--sm">
+      <canvas id="approvalChart"></canvas>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  MULTI-AGENT AI RESEARCH PANEL                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="panel ai-section" id="ai-research">
+  <div class="panel-head">
+    <h2>Multi-Agent AI Research</h2>
+    <div class="ai-header-right">
+      <div class="ai-search-bar">
+        <input id="ai-symbol-input" type="text" placeholder="AAPL, BTC/USD, ETH/USD, SPY…" maxlength="20">
+        <button id="ai-run-btn" type="button" onclick="runAIResearch()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          Analyze
+        </button>
+      </div>
+      <div class="ai-agent-badges">
+        <span class="agent-badge gemini-badge">Gemini</span>
+        <span class="agent-badge grok-badge">Grok</span>
+        <span class="agent-badge claude-badge">Claude 5:1</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading state -->
+  <div id="ai-loading" class="ai-loading hidden">
+    <div class="spinner"></div>
+    <span>Running Gemini + Grok in parallel, then Claude validates 5:1 ratio…</span>
+  </div>
+
+  <!-- Agent cards -->
+  <div id="ai-agents-grid" class="ai-agents-grid">
+    <!-- Gemini -->
+    <div class="agent-card agent-card--gemini" id="card-gemini">
+      <div class="agent-card-header">
+        <div class="agent-icon gemini-icon">G</div>
+        <div>
+          <div class="agent-name">Gemini</div>
+          <div class="agent-role">Market Research · Stocks · Crypto · ETF</div>
+        </div>
+        <span class="signal-badge" id="gemini-signal-badge">—</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-metric-row">
+          <div class="agent-metric"><span>Confidence</span><strong id="gemini-conf">—</strong></div>
+          <div class="agent-metric"><span>Sentiment</span><strong id="gemini-sentiment">—</strong></div>
+          <div class="agent-metric"><span>Target</span><strong id="gemini-target">—</strong></div>
+          <div class="agent-metric"><span>Stop Loss</span><strong id="gemini-sl">—</strong></div>
+          <div class="agent-metric"><span>R:R Ratio</span><strong id="gemini-rr">—</strong></div>
+        </div>
+        <div class="agent-rationale" id="gemini-rationale">Awaiting analysis…</div>
+      </div>
+    </div>
+
+    <!-- Grok -->
+    <div class="agent-card agent-card--grok" id="card-grok">
+      <div class="agent-card-header">
+        <div class="agent-icon grok-icon">X</div>
+        <div>
+          <div class="agent-name">Grok (xAI)</div>
+          <div class="agent-role">News Intelligence · Prediction Charts</div>
+        </div>
+        <span class="signal-badge" id="grok-signal-badge">—</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-metric-row">
+          <div class="agent-metric"><span>Confidence</span><strong id="grok-conf">—</strong></div>
+          <div class="agent-metric"><span>Sentiment</span><strong id="grok-sentiment">—</strong></div>
+          <div class="agent-metric"><span>Target</span><strong id="grok-target">—</strong></div>
+          <div class="agent-metric"><span>Stop Loss</span><strong id="grok-sl">—</strong></div>
+          <div class="agent-metric"><span>Catalyst</span><strong id="grok-catalyst" style="font-size:11px;font-weight:400;">—</strong></div>
+        </div>
+        <div class="agent-rationale" id="grok-rationale">Awaiting analysis…</div>
+      </div>
+    </div>
+
+    <!-- Claude -->
+    <div class="agent-card agent-card--claude" id="card-claude">
+      <div class="agent-card-header">
+        <div class="agent-icon claude-icon">C</div>
+        <div>
+          <div class="agent-name">Claude</div>
+          <div class="agent-role">Trade Executor · 5:1 Risk-Reward Enforcer</div>
+        </div>
+        <span class="signal-badge" id="claude-signal-badge">—</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-metric-row">
+          <div class="agent-metric"><span>Confidence</span><strong id="claude-conf">—</strong></div>
+          <div class="agent-metric"><span>Sentiment</span><strong id="claude-sentiment">—</strong></div>
+          <div class="agent-metric"><span>Take Profit</span><strong id="claude-target">—</strong></div>
+          <div class="agent-metric"><span>Stop Loss</span><strong id="claude-sl">—</strong></div>
+          <div class="agent-metric"><span>R:R Ratio</span><strong id="claude-rr">—</strong></div>
+        </div>
+        <div class="agent-rationale" id="claude-rationale">Awaiting analysis…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Consensus + 5:1 verdict -->
+  <div class="consensus-panel" id="consensus-panel">
+    <div class="consensus-left">
+      <div class="consensus-label">Agent Consensus</div>
+      <div class="consensus-signal" id="consensus-signal">—</div>
+      <div class="consensus-conf" id="consensus-conf">Confidence: —</div>
+    </div>
+    <div class="consensus-center">
+      <div class="rr-meter-label">Risk : Reward Ratio (5:1 required)</div>
+      <div class="rr-meter-bar">
+        <div class="rr-meter-fill" id="rr-meter-fill" style="width:0%"></div>
+        <div class="rr-meter-target" title="5:1 minimum"></div>
+      </div>
+      <div class="rr-meter-values">
+        <span>0</span>
+        <span>2.5</span>
+        <span class="rr-target-marker">5.0 ✓</span>
+        <span>7.5</span>
+        <span>10+</span>
+      </div>
+      <div class="rr-actual" id="rr-actual">R:R — </div>
+    </div>
+    <div class="consensus-right">
+      <div class="verdict-box" id="verdict-box">
+        <div class="verdict-icon" id="verdict-icon">⏳</div>
+        <div class="verdict-text" id="verdict-text">Awaiting Research</div>
+        <div class="verdict-sub" id="verdict-sub">Run analysis to see Claude's trade decision</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trade levels (shown after approval) -->
+  <div class="trade-levels hidden" id="trade-levels">
+    <div class="level-card level-entry">
+      <span>Entry Price</span>
+      <strong id="tl-entry">—</strong>
+    </div>
+    <div class="level-card level-sl">
+      <span>Stop Loss</span>
+      <strong id="tl-sl">—</strong>
+    </div>
+    <div class="level-card level-tp">
+      <span>Take Profit</span>
+      <strong id="tl-tp">—</strong>
+    </div>
+    <div class="level-card level-rr">
+      <span>R:R Ratio</span>
+      <strong id="tl-rr">—</strong>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  TRADING CONTROLS                                                       -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="grid three" id="controls">
+  <!-- Bot Control -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Bot Control</h2>
+      <span class="pill {{ 'chip-good' if agent.running else 'chip-muted' }}">
+        {{ "Running" if agent.running else "Stopped" }}
+      </span>
+    </div>
+    <form class="form-grid" method="post" action="{{ url_for('start_bot') }}">
+      <label class="span2">
+        Symbols
+        <input name="symbols" value="{{ ','.join(config.DEFAULT_DASHBOARD_SYMBOLS) }}" required>
+      </label>
+      <label>
+        Strategy
+        <select name="strategy">
+          {% for strategy in strategies %}
+            <option value="{{ strategy }}">{{ strategy }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Qty / Trade
+        <input name="qty" type="number" min="0.0001" step="0.0001" value="1" required>
+      </label>
+      <label>
+        Interval (s)
+        <input name="interval" type="number" min="5" step="1" value="60" required>
+      </label>
+      <label class="check span2">
+        <input name="dry_run" type="checkbox" checked>
+        Dry run (paper mode)
+      </label>
+      <button type="submit" class="span2">Start Bot</button>
+    </form>
+    <form method="post" action="{{ url_for('stop_bot') }}">
+      <button class="danger w-full" type="submit">Stop Bot</button>
+    </form>
+  </div>
+
+  <!-- Manual Order -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Manual Order</h2>
+      <span class="pill chip-muted">Instant</span>
+    </div>
+    <form class="form-grid" method="post" action="{{ url_for('manual_order') }}">
+      <label>
+        Symbol
+        <input name="symbol" value="AAPL" required>
+      </label>
+      <label>
+        Side
+        <select name="side">
+          <option value="buy">Buy</option>
+          <option value="sell">Sell</option>
+        </select>
+      </label>
+      <label>
+        Qty
+        <input name="qty" type="number" min="0.0001" step="0.0001" value="1" required>
+      </label>
+      <label class="check">
+        <input name="dry_run" type="checkbox" checked>
+        Dry run
+      </label>
+      <button id="manual-submit-btn" type="submit" class="span2" title="Waiting for a NexoSignal AlphaCore score">Submit Order</button>
+    </form>
+    <div class="nexosignal-manual-panel">
+      <div class="nexosignal-gauge" aria-label="Confluence score gauge">
+        <div class="gauge-ring" id="confluence-gauge" style="--score:0">
+          <strong id="confluence-value">0</strong>
+          <span>Confluence</span>
+        </div>
+      </div>
+      <div class="imbalance-shell">
+        <div class="imbalance-meta">
+          <span>Order Book Imbalance</span>
+          <strong id="imbalance-value">0.00</strong>
+        </div>
+        <div class="imbalance-track">
+          <div class="imbalance-fill" id="imbalance-fill"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5:1 Risk Calculator -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>5:1 Risk Calculator</h2>
+      <span class="pill chip-purple">Claude Enforced</span>
+    </div>
+    <div class="risk-calc">
+      <label>
+        Symbol
+        <div class="input-btn-row">
+          <input id="rc-symbol" type="text" placeholder="AAPL" value="AAPL">
+          <button type="button" onclick="fetchRCPrice()" class="ghost small">Fetch</button>
+        </div>
+      </label>
+      <label>
+        Entry Price ($)
+        <input id="rc-entry" type="number" step="0.01" placeholder="0.00">
+      </label>
+      <label>
+        Risk Per Unit ($) <span class="muted" style="font-weight:400;font-size:11px;">= stop distance</span>
+        <input id="rc-risk" type="number" step="0.01" placeholder="ATR-based">
+      </label>
+      <button type="button" onclick="calcRiskReward()" style="margin-top:4px">Calculate 5:1 Levels</button>
+      <div class="rc-results hidden" id="rc-results">
+        <div class="rc-row"><span>Stop Loss</span><strong id="rc-sl">—</strong></div>
+        <div class="rc-row"><span>Take Profit (5:1)</span><strong id="rc-tp">—</strong></div>
+        <div class="rc-row"><span>Max Loss / share</span><strong id="rc-maxloss" class="bad">—</strong></div>
+        <div class="rc-row"><span>Target Gain / share</span><strong id="rc-gain" class="good">—</strong></div>
+        <div class="rc-row rr-row"><span>Risk : Reward</span><strong id="rc-rr" class="good">5.0 : 1</strong></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="autonomous-tracker">
+  <div class="panel-head">
+    <h2>Autonomous Trade Tracker</h2>
+    <span class="pill chip-purple" id="circuit-breaker-pill">Circuit Breaker: Inactive</span>
+  </div>
+  <div id="autonomous-tracks" class="autonomous-tracks">
+    <div class="empty">No active autonomous trades yet</div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  POSITIONS & ORDERS                                                     -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="grid two" id="positions">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Open Positions</h2>
+      <span class="pill chip-muted">{{ positions|length }} active</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>Qty</th><th>Market Value</th><th>Unrealized P/L</th><th>%</th></tr>
+        </thead>
+        <tbody>
+          {% for p in positions %}
+            <tr>
+              <td><strong>{{ p.symbol }}</strong></td>
+              <td>{{ p.qty }}</td>
+              <td>${{ "%.2f"|format(p.market_value|float) }}</td>
+              <td class="{{ 'good' if p.unrealized_pl|float >= 0 else 'bad' }}">
+                ${{ "%.2f"|format(p.unrealized_pl|float) }}
+              </td>
+              <td class="{{ 'good' if p.unrealized_plpc|float >= 0 else 'bad' }}">
+                {{ "%.2f"|format((p.unrealized_plpc|float)*100) }}%
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">No open positions</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Open Orders</h2>
+      <span class="pill chip-muted">{{ open_orders|length }} pending</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          {% for o in open_orders %}
+            <tr>
+              <td><strong>{{ o.symbol }}</strong></td>
+              <td class="{{ 'good' if o.side == 'buy' else 'bad' }}">{{ o.side|upper }}</td>
+              <td>{{ o.qty }}</td>
+              <td>{{ o.status }}</td>
+              <td>
+                <form method="post" action="{{ url_for('cancel_order', order_id=o.id) }}" style="margin:0">
+                  <button class="ghost small danger-ghost" type="submit">✕</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">No open orders</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  GUARDRAILS + WALLET                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="grid two">
+  <div class="panel accent-panel">
+    <div class="panel-head">
+      <h2>System Guardrails</h2>
+      <span class="pill chip-muted">Paper first</span>
+    </div>
+    <div class="guardrail-grid">
+      <div class="guardrail-item">
+        <span class="guardrail-label">Max Order</span>
+        <strong>${{ "%.0f"|format(config.MAX_ORDER_VALUE_USD|float) }}</strong>
+      </div>
+      <div class="guardrail-item">
+        <span class="guardrail-label">Cash Reserve</span>
+        <strong>${{ "%.0f"|format(config.MIN_CASH_RESERVE_USD|float) }}</strong>
+      </div>
+      <div class="guardrail-item">
+        <span class="guardrail-label">Signal Threshold</span>
+        <strong>{{ "%.0f"|format(config.SIGNAL_MIN_CONFIDENCE|float) }}/100</strong>
+      </div>
+      <div class="guardrail-item">
+        <span class="guardrail-label">Max Trades/Day</span>
+        <strong>{{ config.MAX_TRADES_PER_DAY }}</strong>
+      </div>
+      <div class="guardrail-item">
+        <span class="guardrail-label">Daily Loss Limit</span>
+        <strong>{{ "%.0f"|format(config.DAILY_LOSS_LIMIT_PCT|float * 100) }}%</strong>
+      </div>
+      <div class="guardrail-item">
+        <span class="guardrail-label">AI Min R:R</span>
+        <strong>{{ config.AI_MIN_RISK_REWARD_RATIO }}:1</strong>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel accent-panel">
+    <div class="panel-head">
+      <h2>MetaMask Wallet</h2>
+      <button class="ghost small dark" type="button" data-connect-metamask>Connect</button>
+    </div>
+    <div class="wallet-info">
+      <span data-wallet-status class="wallet-address">
+        {% if wallet %}
+          <span class="good">{{ wallet.wallet_address }}</span>
+        {% else %}
+          No wallet connected.
+        {% endif %}
+      </span>
+      <span class="muted" style="font-size:11px">Only public address stored. Keys never enter this dashboard.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  BROKERAGE CONNECTIONS                                                  -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="panel" id="brokerages">
+  <div class="panel-head"><h2>Brokerage Connections</h2></div>
+  <form class="form-grid" method="post" action="{{ url_for('add_brokerage_connection') }}">
+    <label>
+      Provider
+      <select name="provider">
+        <option value="alpaca">Alpaca</option>
+        <option value="interactive_brokers">Interactive Brokers</option>
+        <option value="schwab">Charles Schwab</option>
+        <option value="tradier">Tradier</option>
+        <option value="robinhood">Robinhood</option>
+        <option value="other">Other</option>
+      </select>
+    </label>
+    <label>Account Label<input name="account_label" placeholder="Paper Alpaca account" required></label>
+    <label>Account ID<input name="account_id" placeholder="Optional"></label>
+    <label>
+      Environment
+      <select name="environment">
+        <option value="paper">Paper</option>
+        <option value="live">Live</option>
+        <option value="sandbox">Sandbox</option>
+      </select>
+    </label>
+    <label>
+      Status
+      <select name="status">
+        <option value="manual">Manual</option>
+        <option value="connected">Connected</option>
+        <option value="pending">Pending</option>
+        <option value="disabled">Disabled</option>
+      </select>
+    </label>
+    <label>API Key Last 4<input name="api_key_last4" maxlength="4" placeholder="Optional"></label>
+    <label class="span2">Notes<input name="notes" placeholder="OAuth, permissions…"></label>
+    <button type="submit">Save Connection</button>
+  </form>
+
+  <div class="table-wrap mt">
+    <table>
+      <thead>
+        <tr><th>Provider</th><th>Label</th><th>Account ID</th><th>Environment</th><th>Status</th><th>Key</th><th>Updated</th></tr>
+      </thead>
+      <tbody>
+        {% for b in brokerages %}
+          <tr>
+            <td>{{ b.provider }}</td>
+            <td>{{ b.account_label }}</td>
+            <td class="mono">{{ b.account_id or "" }}</td>
+            <td>{{ b.environment }}</td>
+            <td>{{ b.status }}</td>
+            <td>{% if b.api_key_last4 %}****{{ b.api_key_last4 }}{% endif %}</td>
+            <td>{{ b.created_at|string|truncate(19, True, "") }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="empty">No brokerage connections saved yet</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  SIGNAL INTELLIGENCE                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="panel" id="signals">
+  <div class="panel-head">
+    <h2>Signal Intelligence Engine</h2>
+    <span class="pill chip-muted">{{ signals|length }} events</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th><th>Symbol</th><th>Strategy</th><th>Base</th><th>Final</th>
+          <th>Confidence</th><th>Approved</th><th>Price</th><th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in signals %}
+          <tr>
+            <td class="mono">{{ s.created_at|string|truncate(19, True, "") }}</td>
+            <td><strong>{{ s.symbol }}</strong></td>
+            <td>{{ s.strategy }}</td>
+            <td>
+              <span class="signal-pill {{ 'sig-buy' if s.base_signal == 'buy' else ('sig-sell' if s.base_signal == 'sell' else 'sig-hold') }}">
+                {{ s.base_signal|upper }}
+              </span>
+            </td>
+            <td>
+              <span class="signal-pill {{ 'sig-buy' if s.final_signal == 'buy' else ('sig-sell' if s.final_signal == 'sell' else 'sig-hold') }}">
+                {{ s.final_signal|upper }}
+              </span>
+            </td>
+            <td>
+              <div class="conf-bar-wrap">
+                <div class="conf-bar" style="width:{{ s.confidence|float }}%"></div>
+                <span>{{ "%.0f"|format(s.confidence|float) }}</span>
+              </div>
+            </td>
+            <td class="{{ 'good' if s.approved else 'bad' }}">
+              {{ "✓" if s.approved else "✗" }}
+            </td>
+            <td>${{ "%.2f"|format(s.price|float) }}</td>
+            <td class="reason-cell" title="{{ s.reason }}">{{ s.reason|truncate(60) }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="empty">No signal events yet — start the bot to generate signals</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  TRADE HISTORY                                                          -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="panel" id="trades">
+  <div class="panel-head">
+    <h2>Captured Trade Events</h2>
+    <span class="pill chip-muted">{{ trades|length }} events</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th><th>Source</th><th>Symbol</th><th>Side</th><th>Qty</th>
+          <th>Status</th><th>Order ID</th><th>Price</th><th>Error</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in trades %}
+          <tr>
+            <td class="mono">{{ t.created_at[:19].replace("T", " ") }}</td>
+            <td>{{ t.source }}</td>
+            <td><strong>{{ t.symbol }}</strong></td>
+            <td class="{{ 'good' if t.side == 'buy' else 'bad' }}">{{ t.side|upper }}</td>
+            <td>{{ t.qty }}</td>
+            <td>
+              <span class="status-tag {{ 'status-ok' if t.status in ('filled','submitted') else ('status-warn' if t.status == 'dry_run' else 'status-err') }}">
+                {{ t.status }}{% if t.dry_run %} /dry{% endif %}
+              </span>
+            </td>
+            <td class="mono">{{ (t.order_id or "")[:12] }}{{ "…" if t.order_id and t.order_id|length > 12 else "" }}</td>
+            <td>{% if t.price is not none %}${{ "%.2f"|format(t.price|float) }}{% endif %}</td>
+            <td class="bad" style="font-size:11px">{{ (t.error or "")[:50] }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="empty">No trade events captured yet</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  BOT LOG                                                                -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="panel">
+  <div class="panel-head">
+    <h2>Bot Log</h2>
+    <span class="pill {{ 'chip-good' if agent.running else 'chip-muted' }}">
+      {{ agent.strategy or "—" }}
+    </span>
+  </div>
+  <div class="log" id="bot-log">
+    {% for entry in agent.log %}
+      <div class="log-entry log-{{ entry.level }}">
+        <span class="log-time">{{ entry.time }}</span>
+        <span>{{ entry.msg }}</span>
+      </div>
+    {% else %}
+      <div class="log-entry">No log entries yet</div>
+    {% endfor %}
+  </div>
+  {% if agent.errors %}
+    <div class="error-strip mt">
+      <strong>Recent errors:</strong>
+      {% for e in agent.errors %}
+        <div class="bad" style="font-size:12px;margin-top:4px">{{ e }}</div>
+      {% endfor %}
+    </div>
+{% endif %}
+</section>
+
+<style>
+  .nexosignal-manual-panel{margin-top:16px;display:grid;grid-template-columns:140px 1fr;gap:16px;align-items:center}
+  .gauge-ring{--score:0;width:118px;height:118px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(#16a34a calc(var(--score)*1%),#e5e7eb 0);position:relative}
+  .gauge-ring::after{content:"";position:absolute;width:88px;height:88px;border-radius:50%;background:#fff}
+  .gauge-ring strong,.gauge-ring span{position:relative;z-index:1}
+  .gauge-ring strong{font-size:28px}
+  .gauge-ring span{font-size:11px;color:#64748b;margin-top:44px;position:absolute}
+  .imbalance-meta{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;color:#475569}
+  .imbalance-track{height:14px;background:#e5e7eb;border-radius:999px;position:relative;overflow:hidden}
+  .imbalance-track::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#94a3b8}
+  .imbalance-fill{height:100%;width:0;background:#16a34a;transform-origin:left center;transition:all .25s ease}
+  .autonomous-tracks{display:grid;gap:18px}
+  .trade-track{display:grid;grid-template-columns:90px 1fr 76px;gap:14px;align-items:center}
+  .trade-rail{height:8px;background:linear-gradient(90deg,#dc2626 0 35%,#64748b 35% 65%,#16a34a 65%);border-radius:999px;position:relative}
+  .trade-marker{position:absolute;top:-20px;font-size:10px;color:#64748b;transform:translateX(-50%)}
+  .trade-marker.stop{left:0;color:#dc2626}.trade-marker.entry{left:50%}.trade-marker.target{left:100%;color:#16a34a}
+  .trade-pin{position:absolute;top:-7px;width:22px;height:22px;border-radius:50%;background:#f59e0b;border:3px solid white;box-shadow:0 1px 6px rgba(15,23,42,.25);transform:translateX(-50%);transition:left .25s ease,background .25s ease}
+  .trade-pin.pin-red{background:#dc2626}.trade-pin.pin-amber{background:#f59e0b}.trade-pin.pin-green{background:#16a34a}
+  @media(max-width:720px){.nexosignal-manual-panel{grid-template-columns:1fr}.trade-track{grid-template-columns:1fr}.trade-track strong,.trade-track span{text-align:left}}
+</style>
+
+<script>
+  (() => {
+    const socket = window.io ? window.io() : null;
+    const submitBtn = document.getElementById("manual-submit-btn");
+    const sideSelect = document.querySelector('select[name="side"]');
+    const gauge = document.getElementById("confluence-gauge");
+    const scoreValue = document.getElementById("confluence-value");
+    const imbalanceValue = document.getElementById("imbalance-value");
+    const imbalanceFill = document.getElementById("imbalance-fill");
+    const tracks = document.getElementById("autonomous-tracks");
+    const breakerPill = document.getElementById("circuit-breaker-pill");
+    let currentScore = 0;
+
+    function refreshManualGate() {
+      const buying = !sideSelect || sideSelect.value === "buy";
+      const blocked = buying && currentScore < 70;
+      submitBtn.disabled = blocked;
+      submitBtn.title = blocked ? "Buy disabled: NexoSignal AlphaCore confluence must be at least 70." : "Order allowed by current confluence gate.";
+    }
+
+    function setConfluence(payload) {
+      currentScore = Number(payload.confluence_score || 0);
+      const imbalance = Number(payload.order_book_imbalance || 0);
+      gauge.style.setProperty("--score", Math.max(0, Math.min(100, currentScore)));
+      scoreValue.textContent = currentScore.toFixed(0);
+      imbalanceValue.textContent = imbalance.toFixed(2);
+      const pct = Math.min(50, Math.abs(imbalance) * 50);
+      imbalanceFill.style.width = `${pct}%`;
+      imbalanceFill.style.marginLeft = imbalance < 0 ? `${50 - pct}%` : "50%";
+      imbalanceFill.style.background = imbalance >= 0 ? "#16a34a" : "#dc2626";
+      refreshManualGate();
+    }
+
+    function positionToPct(entry, stop, target, current) {
+      const min = Math.min(stop, entry, target);
+      const max = Math.max(stop, entry, target);
+      return Math.max(0, Math.min(100, ((current - min) / Math.max(max - min, 0.0001)) * 100));
+    }
+
+    function upsertTrack(payload) {
+      if (tracks.querySelector(".empty")) tracks.innerHTML = "";
+      const symbol = payload.symbol;
+      let row = document.getElementById(`track-${symbol}`);
+      const entry = Number(payload.entry_price);
+      const stop = Number(payload.stop_loss);
+      const target = Number(payload.take_profit);
+      const current = Number(payload.current_price);
+      const atr = Number(payload.atr || 0);
+      const pct = positionToPct(entry, stop, target, current);
+      const pinClass = current < entry ? "pin-red" : current >= entry + (2 * atr) ? "pin-green" : "pin-amber";
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "trade-track";
+        row.id = `track-${symbol}`;
+        tracks.appendChild(row);
+      }
+      row.innerHTML = `
+        <strong>${symbol}</strong>
+        <div class="trade-rail">
+          <span class="trade-marker stop">SL $${stop.toFixed(2)}</span>
+          <span class="trade-marker entry">Entry $${entry.toFixed(2)}</span>
+          <span class="trade-marker target">TP $${target.toFixed(2)}</span>
+          <span class="trade-pin ${pinClass}" style="left:${pct}%"></span>
+        </div>
+        <span class="${current >= entry ? "good" : "bad"}">$${current.toFixed(2)}</span>
+      `;
+    }
+
+    sideSelect?.addEventListener("change", refreshManualGate);
+    refreshManualGate();
+    if (!socket) return;
+    socket.on("confluence_update", setConfluence);
+    socket.on("position_update", upsertTrack);
+    socket.on("circuit_breaker_update", payload => {
+      const active = Boolean(payload.active);
+      breakerPill.textContent = `Circuit Breaker: ${active ? "Active" : "Inactive"}`;
+      breakerPill.className = `pill ${active ? "chip-bad" : "chip-purple"}`;
+    });
+  })();
+</script>
+
+{% endblock %}
