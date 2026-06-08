@@ -43,7 +43,7 @@ def emit_agent_event(event_type: str, payload: dict) -> None:
             logger.exception("NexoSignal Agent realtime listener failed")
 
 
-class TradingAgent:
+class NexoSignalAgent:
     def __init__(
         self,
         symbols: list[str],
@@ -451,7 +451,10 @@ class TradingAgent:
             return {"error": str(e)}
 
 
-def start_nexosignal_scheduler(agent: TradingAgent):
+TradingAgent = NexoSignalAgent
+
+
+def start_nexosignal_scheduler(agent: NexoSignalAgent):
     if BackgroundScheduler is None:
         raise RuntimeError("APScheduler is not installed. Install requirements.txt before starting the scheduler.")
     eastern = pytz.timezone("America/New_York")
@@ -465,7 +468,7 @@ def start_nexosignal_scheduler(agent: TradingAgent):
 
 
 if __name__ == "__main__":
-    agent = TradingAgent(config.DEFAULT_DASHBOARD_SYMBOLS, dry_run=True)
+    agent = NexoSignalAgent(config.DEFAULT_DASHBOARD_SYMBOLS, dry_run=True)
     scheduler = start_nexosignal_scheduler(agent)
     try:
         while True:

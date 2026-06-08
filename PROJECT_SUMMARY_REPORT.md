@@ -1,4 +1,4 @@
-# Rites Trading Dashboard - Project Summary
+# NexoSignal - Project Summary
 
 ## Current State
 
@@ -9,7 +9,7 @@ and an AI research scaffold.
 The dashboard is branded as:
 
 ```text
-Rites Trading Dashboard
+NexoSignal
 ```
 
 ## Core Components
@@ -60,7 +60,7 @@ The existing broker layer blocks fund-transfer actions and applies:
 
 The dashboard defaults to paper trading and dry-run operation.
 
-## Signal Intelligence Engine
+## NexoSignal AlphaCore
 
 Implemented in `trading_agent/signal_engine.py`.
 

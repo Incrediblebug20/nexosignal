@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
@@ -28,7 +28,7 @@ SYMBOL_WHITELIST = set(s.strip().upper() for s in _whitelist_raw.split(",") if s
 SYMBOL_BLACKLIST = set(s.strip().upper() for s in _blacklist_raw.split(",") if s.strip())
 
 # Dashboard
-DASHBOARD_BRAND_NAME = os.getenv("DASHBOARD_BRAND_NAME", "Rites Trading Dashboard")
+DASHBOARD_BRAND_NAME = os.getenv("DASHBOARD_BRAND_NAME", "NexoSignal")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "change-me")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "change-this-secret-key")

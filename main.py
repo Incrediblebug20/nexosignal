@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich import box
 from trading_agent import config
 from trading_agent.broker import AlpacaBroker, BrokerError
-from trading_agent.agent import TradingAgent
+from trading_agent.agent import NexoSignalAgent
 from trading_agent.strategy import STRATEGIES
 from trading_agent.restrictions import RejectedOrder
 
@@ -91,7 +91,7 @@ def manual_order(broker: AlpacaBroker, side: str, symbol: str, qty: float):
         console.print(f"[bold red]Order failed:[/bold red] {e}")
 
 
-def interactive_menu(broker: AlpacaBroker, agent: TradingAgent):
+def interactive_menu(broker: AlpacaBroker, agent: NexoSignalAgent):
     console.print("\n[bold]Commands:[/bold] status | quote <SYM> | buy <SYM> <qty> | sell <SYM> <qty> | "
                   "start | stop | log | quit\n")
     while True:
@@ -156,7 +156,7 @@ def main():
         console.print("Make sure you've created a [bold].env[/bold] file (copy from .env.example).")
         sys.exit(1)
 
-    agent = TradingAgent(
+    agent = NexoSignalAgent(
         symbols=args.symbols,
         strategy_name=args.strategy,
         qty_per_trade=args.qty,

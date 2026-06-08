@@ -8,7 +8,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, ses
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from trading_agent import config
-from trading_agent.agent import TradingAgent, register_agent_event_listener
+from trading_agent.agent import NexoSignalAgent, register_agent_event_listener
 from trading_agent.broker import AlpacaBroker, BrokerError
 from trading_agent.restrictions import RejectedOrder
 from trading_agent.storage import (
@@ -38,7 +38,7 @@ app.secret_key = config.FLASK_SECRET_KEY
 socketio = SocketIO(app, cors_allowed_origins="*") if SocketIO else None
 init_db()
 
-_agent: TradingAgent | None = None
+_agent: NexoSignalAgent | None = None
 _agent_thread: threading.Thread | None = None
 _agent_lock = threading.Lock()
 
@@ -312,7 +312,7 @@ def start_bot():
             return redirect(url_for("dashboard"))
 
         try:
-            _agent = TradingAgent(
+            _agent = NexoSignalAgent(
                 symbols=symbols,
                 strategy_name=strategy,
                 qty_per_trade=qty,

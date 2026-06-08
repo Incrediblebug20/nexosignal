@@ -14,21 +14,21 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">RT</span>
+      <span class="brand-mark">NS</span>
       <div>
         <strong>{{ config.DASHBOARD_BRAND_NAME }}</strong>
-        <span>{{ config.TRADING_MODE|upper }} mode</span>
+        <span>NexoSignal Agent · {{ config.TRADING_MODE|upper }} mode</span>
       </div>
     </div>
     {% if session.get("logged_in") %}
       <nav class="topnav">
         <a href="#overview">Overview</a>
-        <a href="#analytics">Analytics</a>
+        <a href="#analytics">AlphaCore</a>
         <a href="#ai-research">AI Research</a>
         <a href="#controls">Controls</a>
         <a href="#positions">Positions</a>
         <a href="#signals">Signals</a>
-        <a href="#trades">Trades</a>
+        <a href="#trades">Ledger</a>
       </nav>
       <form method="post" action="{{ url_for('logout') }}">
         <button class="ghost" type="submit">Logout</button>

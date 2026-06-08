@@ -48,7 +48,7 @@ class SignalDecision:
 
 
 @dataclass(frozen=True)
-class AlphaCoreCandidate:
+class NexoSignalAlphaCoreCandidate:
     symbol: str
     price: float
     volume: float
@@ -62,7 +62,7 @@ class AlphaCoreCandidate:
 
 
 @dataclass
-class AlphaCoreModel:
+class NexoSignalAlphaCoreModel:
     means: dict[str, float]
     weights: dict[str, float]
     xgb_model: Any | None = None
@@ -114,7 +114,7 @@ async def run_alphacore_pipeline(
     data_base: str,
     emit_update=None,
     max_candidates: int = 5,
-) -> list[AlphaCoreCandidate]:
+) -> list[NexoSignalAlphaCoreCandidate]:
     """NexoSignal AlphaCore async three-stage pipeline."""
     stage1 = filter_liquid_stocks(snapshot)
     stage2: list[dict] = []
@@ -203,7 +203,7 @@ async def load_or_train_alphacore_model(
     headers: dict[str, str],
     data_base: str,
     symbols: list[str],
-) -> AlphaCoreModel:
+) -> NexoSignalAlphaCoreModel:
     model_path = config.ALPHACORE_MODEL_PATH
     if os.path.exists(model_path) and time.time() - os.path.getmtime(model_path) < 24 * 60 * 60:
         with open(model_path, "rb") as fh:
@@ -215,7 +215,7 @@ async def load_or_train_alphacore_model(
     return model
 
 
-async def train_alphacore_model(headers: dict[str, str], data_base: str, symbols: list[str]) -> AlphaCoreModel:
+async def train_alphacore_model(headers: dict[str, str], data_base: str, symbols: list[str]) -> NexoSignalAlphaCoreModel:
     """NexoSignal AlphaCore Stage 3 training with optional XGBoost-compatible fallback."""
     datasets = await asyncio.gather(
         *[fetch_historical_bars(headers, data_base, symbol, limit=120) for symbol in symbols[:25]],
@@ -234,7 +234,7 @@ async def train_alphacore_model(headers: dict[str, str], data_base: str, symbols
 
     keys = ["rsi", "vwap_deviation", "sma_slope_delta", "atr", "volume_z"]
     if not rows:
-        return AlphaCoreModel(means={k: 0.0 for k in keys}, weights=default_alphacore_weights())
+        return NexoSignalAlphaCoreModel(means={k: 0.0 for k in keys}, weights=default_alphacore_weights())
 
     try:
         from xgboost import XGBClassifier
@@ -250,20 +250,20 @@ async def train_alphacore_model(headers: dict[str, str], data_base: str, symbols
         xgb_model = None
 
     means = {key: mean([row[key] for row in rows]) for key in keys}
-    return AlphaCoreModel(means=means, weights=weights, xgb_model=xgb_model, feature_keys=tuple(keys))
+    return NexoSignalAlphaCoreModel(means=means, weights=weights, xgb_model=xgb_model, feature_keys=tuple(keys))
 
 
 async def rank_alphacore_candidates(
     candidates: list[dict],
-    model: AlphaCoreModel,
+    model: NexoSignalAlphaCoreModel,
     headers: dict[str, str],
     data_base: str,
-) -> list[AlphaCoreCandidate]:
+) -> list[NexoSignalAlphaCoreCandidate]:
     bars_by_symbol = await asyncio.gather(
         *[fetch_historical_bars(headers, data_base, c["symbol"], limit=80) for c in candidates],
         return_exceptions=True,
     )
-    ranked: list[AlphaCoreCandidate] = []
+    ranked: list[NexoSignalAlphaCoreCandidate] = []
     for candidate, bars in zip(candidates, bars_by_symbol):
         source_bars = candidate["bars"]
         if not isinstance(bars, Exception) and len(bars) >= 20:
@@ -272,7 +272,7 @@ async def rank_alphacore_candidates(
         probability = model.predict_probability(features)
         price = snapshot_price(candidate["snapshot"])
         ranked.append(
-            AlphaCoreCandidate(
+            NexoSignalAlphaCoreCandidate(
                 symbol=candidate["symbol"],
                 price=round(price, 4),
                 volume=snapshot_volume(candidate["snapshot"]),
@@ -286,6 +286,10 @@ async def rank_alphacore_candidates(
             )
         )
     return sorted(ranked, key=lambda c: (c.probability, c.confluence_score), reverse=True)
+
+
+AlphaCoreCandidate = NexoSignalAlphaCoreCandidate
+AlphaCoreModel = NexoSignalAlphaCoreModel
 
 
 async def fetch_historical_bars(headers: dict[str, str], data_base: str, symbol: str, limit: int = 120) -> list[dict]:

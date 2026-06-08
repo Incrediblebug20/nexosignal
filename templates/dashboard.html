@@ -10,9 +10,9 @@
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="dashboard-hero" id="overview">
   <div>
-    <p class="eyebrow">Trading Operations Center</p>
+    <p class="eyebrow">NexoSignal Operations Center</p>
     <h1>{{ config.DASHBOARD_BRAND_NAME }}</h1>
-    <p class="hero-copy">Multi-agent AI research · Signal intelligence engine · 5:1 risk-reward enforcement</p>
+    <p class="hero-copy">AlphaCore scoring · Guard risk checks · Executor orders · Ledger audit trail · Agent scheduler</p>
   </div>
   <div class="hero-status">
     <span class="status-chip {{ 'chip-good' if clock and clock.is_open else 'chip-bad' }}">
@@ -21,7 +21,7 @@
     </span>
     <span class="status-chip {{ 'chip-good' if agent.running else 'chip-muted' }}">
       <span class="live-dot {{ 'dot-green' if agent.running else 'dot-gray' }}"></span>
-      Bot {{ "Running" if agent.running else "Stopped" }}
+      NexoSignal Agent {{ "Running" if agent.running else "Stopped" }}
     </span>
     <span class="status-chip chip-muted">{{ config.DATABASE_LABEL }} DB</span>
     <span class="status-chip chip-muted" id="last-refresh">Live</span>
@@ -74,17 +74,17 @@
   <div class="metric">
     <span class="metric-label">Trades Today</span>
     <strong class="metric-value">{{ summary.total or 0 }}</strong>
-    <span class="metric-sub">Captured events</span>
+    <span class="metric-sub">NexoSignal Ledger</span>
   </div>
   <div class="metric">
     <span class="metric-label">Total Signals</span>
     <strong class="metric-value">{{ signal_summary.total or 0 }}</strong>
-    <span class="metric-sub">Signal engine</span>
+    <span class="metric-sub">NexoSignal AlphaCore</span>
   </div>
   <div class="metric">
     <span class="metric-label">Approved</span>
     <strong class="metric-value good">{{ signal_summary.approved or 0 }}</strong>
-    <span class="metric-sub">Passed threshold</span>
+    <span class="metric-sub">Guard approved</span>
   </div>
   <div class="metric">
     <span class="metric-label">Avg Confidence</span>
@@ -93,7 +93,7 @@
         {{ "%.0f"|format(signal_summary.avg_confidence|float) }}<span style="font-size:14px;color:var(--muted)">/100</span>
       {% else %}—{% endif %}
     </strong>
-    <span class="metric-sub">Signal score</span>
+    <span class="metric-sub">AlphaCore score</span>
   </div>
 </section>
 
@@ -103,7 +103,7 @@
 <section class="charts-row" id="analytics">
   <div class="chart-card">
     <div class="chart-head">
-      <h2>Signal Confidence Trend</h2>
+      <h2>AlphaCore Confidence Trend</h2>
       <span class="pill chip-muted">Last 30 signals</span>
     </div>
     <div class="chart-body">
@@ -113,7 +113,7 @@
 
   <div class="chart-card">
     <div class="chart-head">
-      <h2>Signal Direction Split</h2>
+      <h2>AlphaCore Direction Split</h2>
       <span class="pill chip-muted">All time</span>
     </div>
     <div class="chart-body chart-body--sm">
@@ -137,7 +137,7 @@
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="panel ai-section" id="ai-research">
   <div class="panel-head">
-    <h2>Multi-Agent AI Research</h2>
+    <h2>NexoSignal Research Console</h2>
     <div class="ai-header-right">
       <div class="ai-search-bar">
         <input id="ai-symbol-input" type="text" placeholder="AAPL, BTC/USD, ETH/USD, SPY…" maxlength="20">
@@ -212,7 +212,7 @@
         <div class="agent-icon claude-icon">C</div>
         <div>
           <div class="agent-name">Claude</div>
-          <div class="agent-role">Trade Executor · 5:1 Risk-Reward Enforcer</div>
+          <div class="agent-role">NexoSignal Executor · 5:1 Risk-Reward Enforcer</div>
         </div>
         <span class="signal-badge" id="claude-signal-badge">—</span>
       </div>
@@ -232,7 +232,7 @@
   <!-- Consensus + 5:1 verdict -->
   <div class="consensus-panel" id="consensus-panel">
     <div class="consensus-left">
-      <div class="consensus-label">Agent Consensus</div>
+      <div class="consensus-label">NexoSignal Agent Consensus</div>
       <div class="consensus-signal" id="consensus-signal">—</div>
       <div class="consensus-conf" id="consensus-conf">Confidence: —</div>
     </div>
@@ -285,10 +285,10 @@
 <!--  TRADING CONTROLS                                                       -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="grid three" id="controls">
-  <!-- Bot Control -->
+  <!-- NexoSignal Agent Control -->
   <div class="panel">
     <div class="panel-head">
-      <h2>Bot Control</h2>
+      <h2>NexoSignal Agent Control</h2>
       <span class="pill {{ 'chip-good' if agent.running else 'chip-muted' }}">
         {{ "Running" if agent.running else "Stopped" }}
       </span>
@@ -318,18 +318,18 @@
         <input name="dry_run" type="checkbox" checked>
         Dry run (paper mode)
       </label>
-      <button type="submit" class="span2">Start Bot</button>
+      <button type="submit" class="span2">Start NexoSignal Agent</button>
     </form>
     <form method="post" action="{{ url_for('stop_bot') }}">
-      <button class="danger w-full" type="submit">Stop Bot</button>
+      <button class="danger w-full" type="submit">Stop NexoSignal Agent</button>
     </form>
   </div>
 
-  <!-- Manual Order -->
+  <!-- NexoSignal Executor Manual Order -->
   <div class="panel">
     <div class="panel-head">
-      <h2>Manual Order</h2>
-      <span class="pill chip-muted">Instant</span>
+      <h2>NexoSignal Executor</h2>
+      <span class="pill chip-muted">Manual mode</span>
     </div>
     <form class="form-grid" method="post" action="{{ url_for('manual_order') }}">
       <label>
@@ -408,8 +408,8 @@
 
 <section class="panel" id="autonomous-tracker">
   <div class="panel-head">
-    <h2>Autonomous Trade Tracker</h2>
-    <span class="pill chip-purple" id="circuit-breaker-pill">Circuit Breaker: Inactive</span>
+    <h2>NexoSignal Executor Tracker</h2>
+    <span class="pill chip-purple" id="circuit-breaker-pill">NexoSignal Guard: Inactive</span>
   </div>
   <div id="autonomous-tracks" class="autonomous-tracks">
     <div class="empty">No active autonomous trades yet</div>
@@ -487,7 +487,7 @@
 <section class="grid two">
   <div class="panel accent-panel">
     <div class="panel-head">
-      <h2>System Guardrails</h2>
+      <h2>NexoSignal Guard</h2>
       <span class="pill chip-muted">Paper first</span>
     </div>
     <div class="guardrail-grid">
@@ -500,7 +500,7 @@
         <strong>${{ "%.0f"|format(config.MIN_CASH_RESERVE_USD|float) }}</strong>
       </div>
       <div class="guardrail-item">
-        <span class="guardrail-label">Signal Threshold</span>
+        <span class="guardrail-label">AlphaCore Threshold</span>
         <strong>{{ "%.0f"|format(config.SIGNAL_MIN_CONFIDENCE|float) }}/100</strong>
       </div>
       <div class="guardrail-item">
@@ -602,11 +602,11 @@
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  SIGNAL INTELLIGENCE                                                    -->
+<!--  NEXOSIGNAL ALPHACORE                                                   -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="panel" id="signals">
   <div class="panel-head">
-    <h2>Signal Intelligence Engine</h2>
+    <h2>NexoSignal AlphaCore</h2>
     <span class="pill chip-muted">{{ signals|length }} events</span>
   </div>
   <div class="table-wrap">
@@ -646,7 +646,7 @@
             <td class="reason-cell" title="{{ s.reason }}">{{ s.reason|truncate(60) }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="9" class="empty">No signal events yet — start the bot to generate signals</td></tr>
+          <tr><td colspan="9" class="empty">No AlphaCore events yet - start the NexoSignal Agent to generate signals</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -658,7 +658,7 @@
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="panel" id="trades">
   <div class="panel-head">
-    <h2>Captured Trade Events</h2>
+    <h2>NexoSignal Ledger Trade Events</h2>
     <span class="pill chip-muted">{{ trades|length }} events</span>
   </div>
   <div class="table-wrap">
@@ -695,11 +695,11 @@
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  BOT LOG                                                                -->
+<!--  NEXOSIGNAL AGENT LOG                                                   -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="panel">
   <div class="panel-head">
-    <h2>Bot Log</h2>
+    <h2>NexoSignal Agent Log</h2>
     <span class="pill {{ 'chip-good' if agent.running else 'chip-muted' }}">
       {{ agent.strategy or "—" }}
     </span>
@@ -820,7 +820,7 @@
     socket.on("position_update", upsertTrack);
     socket.on("circuit_breaker_update", payload => {
       const active = Boolean(payload.active);
-      breakerPill.textContent = `Circuit Breaker: ${active ? "Active" : "Inactive"}`;
+      breakerPill.textContent = `NexoSignal Guard: ${active ? "Active" : "Inactive"}`;
       breakerPill.className = `pill ${active ? "chip-bad" : "chip-purple"}`;
     });
   })();

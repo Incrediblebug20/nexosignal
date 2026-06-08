@@ -1,4 +1,4 @@
-# Deploy Rites Trading Dashboard Online
+# Deploy NexoSignal Online
 
 This deploys the dashboard so you can log in from any device.
 
@@ -33,7 +33,7 @@ SUPABASE_ANON_KEY=
 ## 3. Required Vercel Env Vars
 
 ```env
-DASHBOARD_BRAND_NAME=Rites Trading Dashboard
+DASHBOARD_BRAND_NAME=NexoSignal
 DASHBOARD_USERNAME=admin
 DASHBOARD_PASSWORD=replace-with-a-strong-password
 FLASK_SECRET_KEY=replace-with-a-long-random-secret
