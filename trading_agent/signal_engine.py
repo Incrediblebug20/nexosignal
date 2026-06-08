@@ -21,6 +21,15 @@ from . import config
 
 
 Signal = Literal["buy", "sell", "hold"]
+ALPHACORE_FEATURE_KEYS = (
+    "rsi",
+    "vwap_deviation",
+    "sma_slope_delta",
+    "atr",
+    "volume_z",
+    "ema_trend_delta",
+    "macd_histogram",
+)
 
 
 @dataclass(frozen=True)
@@ -28,9 +37,16 @@ class IndicatorSnapshot:
     close: float
     sma_fast: float
     sma_slow: float
+    ema20: float
+    ema50: float
     rsi: float
+    macd: float
+    macd_signal: float
+    macd_histogram: float
     vwap: float
+    atr: float
     volume_ratio: float
+    volume_z: float
     candle_body_pct: float
     candle_direction: str
     trend: str
@@ -59,6 +75,19 @@ class NexoSignalAlphaCoreCandidate:
     vwap: float
     rsi: float
     sma_slope_delta: float
+    ema_trend_delta: float
+    macd_histogram: float
+    liquidity_score: float
+    spread_bps: float
+    slippage_estimate_bps: float
+
+
+@dataclass(frozen=True)
+class NexoSignalLiquiditySnapshot:
+    order_book_imbalance: float
+    spread_bps: float
+    slippage_estimate_bps: float
+    liquidity_score: float
 
 
 @dataclass
@@ -66,7 +95,7 @@ class NexoSignalAlphaCoreModel:
     means: dict[str, float]
     weights: dict[str, float]
     xgb_model: Any | None = None
-    feature_keys: tuple[str, ...] = ("rsi", "vwap_deviation", "sma_slope_delta", "atr", "volume_z")
+    feature_keys: tuple[str, ...] = ALPHACORE_FEATURE_KEYS
 
     def predict_probability(self, features: dict[str, float]) -> float:
         if self.xgb_model is not None:
@@ -123,20 +152,23 @@ async def run_alphacore_pipeline(
         if len(bars) < 50:
             continue
         confluence = compute_confluence_score(bars)
-        imbalance = compute_order_book_imbalance(item)
+        liquidity = compute_liquidity_snapshot(item, bars)
         if emit_update:
             emit_update({
                 "symbol": symbol,
                 "confluence_score": round(confluence, 2),
-                "order_book_imbalance": round(imbalance, 4),
+                "order_book_imbalance": round(liquidity.order_book_imbalance, 4),
+                "liquidity_score": round(liquidity.liquidity_score, 2),
+                "spread_bps": round(liquidity.spread_bps, 2),
             })
-        if confluence >= 70:
+        if confluence >= 70 and liquidity.liquidity_score >= 55:
             stage2.append({
                 "symbol": symbol,
                 "snapshot": item,
                 "bars": bars,
                 "confluence_score": confluence,
-                "order_book_imbalance": imbalance,
+                "liquidity": liquidity,
+                "order_book_imbalance": liquidity.order_book_imbalance,
             })
 
     if not stage2:
@@ -171,6 +203,9 @@ def compute_confluence_score(bars: list[dict]) -> float:
     vwap = compute_vwap(bars)
     sma20 = mean(closes[-20:])
     sma50 = mean(closes[-50:])
+    ema20 = compute_ema(closes, 20)
+    ema50 = compute_ema(closes, 50)
+    macd, macd_signal, macd_hist = compute_macd(closes)
     prev_sma20 = mean(closes[-25:-5]) if len(closes) >= 55 else sma20
     prev_sma50 = mean(closes[-55:-5]) if len(closes) >= 55 else sma50
 
@@ -196,7 +231,17 @@ def compute_confluence_score(bars: list[dict]) -> float:
     else:
         sma_score = 50.0
 
-    return round((rsi_score * 0.35) + (vwap_score * 0.35) + (sma_score * 0.30), 2)
+    ema_score = 100.0 if ema20 > ema50 and current > ema20 else 45.0 if ema20 > ema50 else 0.0
+    macd_score = 100.0 if macd_hist > 0 and macd >= macd_signal else 40.0 if macd_hist > -0.02 else 0.0
+
+    return round(
+        (rsi_score * 0.25)
+        + (vwap_score * 0.25)
+        + (sma_score * 0.20)
+        + (ema_score * 0.15)
+        + (macd_score * 0.15),
+        2,
+    )
 
 
 async def load_or_train_alphacore_model(
@@ -232,7 +277,7 @@ async def train_alphacore_model(headers: dict[str, str], data_base: str, symbols
             rows.append(features)
             labels.append(1 if float(bars[i + 1]["c"]) > float(bars[i]["c"]) else 0)
 
-    keys = ["rsi", "vwap_deviation", "sma_slope_delta", "atr", "volume_z"]
+    keys = list(ALPHACORE_FEATURE_KEYS)
     if not rows:
         return NexoSignalAlphaCoreModel(means={k: 0.0 for k in keys}, weights=default_alphacore_weights())
 
@@ -271,18 +316,24 @@ async def rank_alphacore_candidates(
         features = alphacore_features(source_bars)
         probability = model.predict_probability(features)
         price = snapshot_price(candidate["snapshot"])
+        liquidity: NexoSignalLiquiditySnapshot = candidate.get("liquidity") or compute_liquidity_snapshot(candidate["snapshot"], source_bars)
         ranked.append(
             NexoSignalAlphaCoreCandidate(
                 symbol=candidate["symbol"],
                 price=round(price, 4),
                 volume=snapshot_volume(candidate["snapshot"]),
                 confluence_score=round(candidate["confluence_score"], 2),
-                order_book_imbalance=round(candidate["order_book_imbalance"], 4),
+                order_book_imbalance=round(liquidity.order_book_imbalance, 4),
                 probability=round(probability, 4),
                 atr=round(features["atr"], 4),
                 vwap=round(compute_vwap(source_bars), 4),
                 rsi=round(features["rsi"], 2),
                 sma_slope_delta=round(features["sma_slope_delta"], 4),
+                ema_trend_delta=round(features["ema_trend_delta"], 4),
+                macd_histogram=round(features["macd_histogram"], 4),
+                liquidity_score=round(liquidity.liquidity_score, 2),
+                spread_bps=round(liquidity.spread_bps, 2),
+                slippage_estimate_bps=round(liquidity.slippage_estimate_bps, 2),
             )
         )
     return sorted(ranked, key=lambda c: (c.probability, c.confluence_score), reverse=True)
@@ -309,6 +360,9 @@ def alphacore_features(bars: list[dict]) -> dict[str, float]:
     current = closes[-1]
     sma20 = mean(closes[-20:]) if len(closes) >= 20 else mean(closes)
     sma50 = mean(closes[-50:]) if len(closes) >= 50 else mean(closes)
+    ema20 = compute_ema(closes, 20)
+    ema50 = compute_ema(closes, 50)
+    _, _, macd_hist = compute_macd(closes)
     prev_sma20 = mean(closes[-25:-5]) if len(closes) >= 55 else sma20
     prev_sma50 = mean(closes[-55:-5]) if len(closes) >= 55 else sma50
     volume_avg = mean(volumes[-30:]) if volumes else 0.0
@@ -320,6 +374,8 @@ def alphacore_features(bars: list[dict]) -> dict[str, float]:
         "sma_slope_delta": (sma20 - prev_sma20) - (sma50 - prev_sma50),
         "atr": compute_atr(bars),
         "volume_z": ((volumes[-1] - volume_avg) / volume_std) if volumes else 0.0,
+        "ema_trend_delta": ema20 - ema50,
+        "macd_histogram": macd_hist,
     }
 
 
@@ -342,6 +398,8 @@ def default_alphacore_weights() -> dict[str, float]:
         "sma_slope_delta": 0.50,
         "atr": -0.02,
         "volume_z": 0.15,
+        "ema_trend_delta": 0.25,
+        "macd_histogram": 0.30,
     }
 
 
@@ -378,6 +436,33 @@ def compute_order_book_imbalance(item: dict) -> float:
     return (bid_size - ask_size) / total
 
 
+def compute_liquidity_snapshot(item: dict, bars: list[dict] | None = None) -> NexoSignalLiquiditySnapshot:
+    quote = item.get("latestQuote") or item.get("quote") or {}
+    bid = float(quote.get("bp") or quote.get("bid_price") or 0)
+    ask = float(quote.get("ap") or quote.get("ask_price") or 0)
+    price = snapshot_price(item) or ((bid + ask) / 2 if bid and ask else 0.0)
+    spread = max(ask - bid, 0.0) if bid > 0 and ask > 0 else 0.0
+    spread_bps = (spread / max(price, 0.0001)) * 10_000 if price else 999.0
+    imbalance = compute_order_book_imbalance(item)
+    volume = snapshot_volume(item)
+    avg_volume = volume
+    if bars:
+        vols = [float(b.get("v", 0)) for b in bars if b.get("v") is not None]
+        avg_volume = mean(vols[-20:]) if vols else volume
+    volume_ratio = volume / max(avg_volume, 1.0)
+    spread_penalty = min(45.0, spread_bps * 2.0)
+    imbalance_bonus = max(-15.0, min(15.0, imbalance * 20.0))
+    volume_bonus = max(0.0, min(20.0, (volume_ratio - 1.0) * 10.0))
+    liquidity_score = max(0.0, min(100.0, 75.0 - spread_penalty + imbalance_bonus + volume_bonus))
+    slippage_estimate_bps = max(0.0, spread_bps / 2.0) + max(0.0, 10.0 - liquidity_score / 10.0)
+    return NexoSignalLiquiditySnapshot(
+        order_book_imbalance=imbalance,
+        spread_bps=spread_bps,
+        slippage_estimate_bps=slippage_estimate_bps,
+        liquidity_score=liquidity_score,
+    )
+
+
 def compute_indicators(bars: list[dict]) -> IndicatorSnapshot:
     if not bars:
         raise ValueError("bars are required")
@@ -392,17 +477,22 @@ def compute_indicators(bars: list[dict]) -> IndicatorSnapshot:
 
     sma_fast = mean(closes[-5:])
     sma_slow = mean(closes[-20:]) if len(closes) >= 20 else mean(closes)
+    ema20 = compute_ema(closes, 20)
+    ema50 = compute_ema(closes, 50)
     rsi = compute_rsi(closes)
+    macd, macd_signal, macd_hist = compute_macd(closes)
     vwap = compute_vwap(bars)
+    atr = compute_atr(bars)
     avg_volume = mean(volumes[-20:]) if volumes else 0
     volume_ratio = (volumes[-1] / avg_volume) if avg_volume > 0 else 0
+    volume_z = compute_volume_z(volumes)
     candle_range = max(high - low, 0.000001)
     candle_body_pct = abs(close - open_) / candle_range
     candle_direction = "bullish" if close > open_ else "bearish" if close < open_ else "neutral"
 
-    if sma_fast > sma_slow and close >= sma_fast:
+    if sma_fast > sma_slow and close >= sma_fast and ema20 >= ema50:
         trend = "up"
-    elif sma_fast < sma_slow and close <= sma_fast:
+    elif sma_fast < sma_slow and close <= sma_fast and ema20 <= ema50:
         trend = "down"
     else:
         trend = "mixed"
@@ -411,9 +501,16 @@ def compute_indicators(bars: list[dict]) -> IndicatorSnapshot:
         close=close,
         sma_fast=round(sma_fast, 4),
         sma_slow=round(sma_slow, 4),
+        ema20=round(ema20, 4),
+        ema50=round(ema50, 4),
         rsi=round(rsi, 2),
+        macd=round(macd, 4),
+        macd_signal=round(macd_signal, 4),
+        macd_histogram=round(macd_hist, 4),
         vwap=round(vwap, 4),
+        atr=round(atr, 4),
         volume_ratio=round(volume_ratio, 3),
+        volume_z=round(volume_z, 3),
         candle_body_pct=round(candle_body_pct, 3),
         candle_direction=candle_direction,
         trend=trend,
@@ -434,6 +531,9 @@ def score_signal(signal: Signal, i: IndicatorSnapshot) -> tuple[float, list[str]
         if i.close >= i.vwap:
             score += 10
             reasons.append("price above VWAP")
+        if i.ema20 >= i.ema50 and i.macd_histogram > 0:
+            score += 10
+            reasons.append("EMA/MACD momentum confirms buy")
         if 35 <= i.rsi <= 68:
             score += 10
             reasons.append("RSI in constructive range")
@@ -451,6 +551,9 @@ def score_signal(signal: Signal, i: IndicatorSnapshot) -> tuple[float, list[str]
         if i.close <= i.vwap:
             score += 10
             reasons.append("price below VWAP")
+        if i.ema20 <= i.ema50 and i.macd_histogram < 0:
+            score += 10
+            reasons.append("EMA/MACD momentum confirms sell")
         if 32 <= i.rsi <= 65:
             score += 10
             reasons.append("RSI supports exit/short bias")
@@ -469,6 +572,39 @@ def score_signal(signal: Signal, i: IndicatorSnapshot) -> tuple[float, list[str]
         reasons.append("weak volume")
 
     return max(0, min(100, score)), reasons
+
+
+def compute_ema(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    window = values[-period:] if len(values) >= period else values
+    multiplier = 2 / (len(window) + 1)
+    ema = window[0]
+    for value in window[1:]:
+        ema = (value - ema) * multiplier + ema
+    return ema
+
+
+def compute_macd(closes: list[float]) -> tuple[float, float, float]:
+    if not closes:
+        return 0.0, 0.0, 0.0
+    macd_series: list[float] = []
+    for idx in range(len(closes)):
+        subset = closes[: idx + 1]
+        macd_series.append(compute_ema(subset, 12) - compute_ema(subset, 26))
+    macd = macd_series[-1]
+    signal = compute_ema(macd_series, 9)
+    return macd, signal, macd - signal
+
+
+def compute_volume_z(volumes: list[float], period: int = 30) -> float:
+    if not volumes:
+        return 0.0
+    window = volumes[-period:]
+    avg = mean(window)
+    variance = mean([(v - avg) ** 2 for v in window])
+    std = math.sqrt(variance) if variance > 0 else 1.0
+    return (volumes[-1] - avg) / std
 
 
 def compute_rsi(closes: list[float], period: int = 14) -> float:

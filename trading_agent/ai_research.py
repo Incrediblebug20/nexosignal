@@ -20,6 +20,8 @@ Usage:
 
 import json
 import logging
+import re
+import requests
 import concurrent.futures
 from dataclasses import dataclass
 from typing import Optional, Literal
@@ -68,6 +70,18 @@ class AIResearchSignal:
 
 
 @dataclass
+class MasterDecision:
+    signal: Signal
+    confidence: float
+    approved: bool
+    disagreement: bool
+    buy_weight: float
+    sell_weight: float
+    total_weight: float
+    rationale: str
+
+
+@dataclass
 class MultiAgentResearch:
     symbol: str
     gemini: Optional[AIResearchSignal]
@@ -80,6 +94,7 @@ class MultiAgentResearch:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_reward_ratio: Optional[float] = None
+    master_decision: Optional[MasterDecision] = None
 
 
 def _parse_json_response(text: str) -> dict:
@@ -263,6 +278,58 @@ def _grok_research(symbol: str, price: float, bars: list[dict]) -> AIResearchSig
 #  Claude: trade execution with 5:1 risk-reward validation
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _ollama_research(symbol: str, price: float, bars: list[dict]) -> AIResearchSignal:
+    """Optional local Mistral/Ollama analyst for no-cloud dry-run research."""
+    if not config.LOCAL_LLM_ENABLED:
+        return AIResearchSignal(
+            provider="ollama",
+            symbol=symbol,
+            signal="hold",
+            confidence=0,
+            rationale="Local LLM disabled (set LOCAL_LLM_ENABLED=true to use Ollama).",
+            error="disabled",
+        )
+
+    closes = [float(b["c"]) for b in bars[-20:]]
+    pct_chg = ((closes[-1] - closes[0]) / closes[0] * 100) if len(closes) >= 2 else 0.0
+    prompt = (
+        f"Analyze {symbol} for an intraday trade. Current price={price:.4f}. "
+        f"20-bar change={pct_chg:+.2f}%. Recent closes={closes[-8:]}. "
+        "Return only JSON with: signal, confidence, sentiment, rationale."
+    )
+
+    try:
+        resp = requests.post(
+            f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+            json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            timeout=20,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"Ollama HTTP {resp.status_code}")
+        text = str(resp.json().get("response", "{}"))
+        data = _parse_json_response(text)
+        return AIResearchSignal(
+            provider="ollama",
+            symbol=symbol,
+            signal=_safe_signal(data.get("signal", "hold")),
+            confidence=float(data.get("confidence", 50)),
+            rationale=str(data.get("rationale", "")),
+            sentiment=str(data.get("sentiment", "neutral")),
+            timeframe="intraday",
+            raw_response=text,
+        )
+    except Exception as exc:
+        logger.warning("Ollama research failed for %s: %s", symbol, exc)
+        return AIResearchSignal(
+            provider="ollama",
+            symbol=symbol,
+            signal="hold",
+            confidence=0,
+            rationale=f"Ollama error: {str(exc)[:120]}",
+            error=str(exc)[:200],
+        )
+
+
 def _claude_execution_decision(
     symbol: str,
     price: float,
@@ -388,11 +455,13 @@ def run_multi_agent_research(
     atr = _compute_atr(bars)
     gemini_result: Optional[AIResearchSignal] = None
     grok_result: Optional[AIResearchSignal] = None
+    ollama_result: Optional[AIResearchSignal] = None
 
-    # Gemini and Grok run in parallel (network-bound)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    # Market, sentiment, and optional local LLM agents run in parallel.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         gem_f = pool.submit(_gemini_research, symbol, price, bars)
         grk_f = pool.submit(_grok_research, symbol, price, bars)
+        ollama_f = pool.submit(_ollama_research, symbol, price, bars)
         try:
             gemini_result = gem_f.result(timeout=20)
         except Exception as exc:
@@ -401,6 +470,10 @@ def run_multi_agent_research(
             grok_result = grk_f.result(timeout=20)
         except Exception as exc:
             logger.warning("Grok future error: %s", exc)
+        try:
+            ollama_result = ollama_f.result(timeout=20)
+        except Exception as exc:
+            logger.warning("Ollama future error: %s", exc)
 
     # Claude runs after collecting the other agents' results
     claude_result = _claude_execution_decision(
@@ -425,12 +498,16 @@ def run_multi_agent_research(
 
     _accum(gemini_result, 1.0)
     _accum(grok_result, 1.0)
+    _accum(ollama_result, 0.75)
     _accum(claude_result, 2.0)     # Claude gets 2× weight — it's the executor
     # Base technical signal also votes
     if base_signal != "hold":
         w = base_confidence
         total_w += w
-        (buy_w if base_signal == "buy" else sell_w).__iadd__(w)  # type: ignore
+        if base_signal == "buy":
+            buy_w += w
+        else:
+            sell_w += w
 
     if total_w > 0:
         if buy_w > sell_w and buy_w / total_w >= 0.50:
@@ -455,6 +532,35 @@ def run_multi_agent_research(
         and claude_result.risk_reward_ratio is not None
         and claude_result.risk_reward_ratio >= min_ratio
     )
+    active_agents = [
+        sig for sig in (gemini_result, grok_result, ollama_result, claude_result)
+        if sig and not sig.error and sig.signal != "hold"
+    ]
+    disagreement = len({sig.signal for sig in active_agents}) > 1
+    approved_master = bool(
+        approved_5to1
+        and consensus != "hold"
+        and consensus_conf >= config.MASTER_CONSENSUS_MIN_CONFIDENCE
+        and not disagreement
+    )
+    if disagreement:
+        rationale = "Agents disagree; NexoSignal Master Decision forced HOLD."
+    elif not approved_5to1:
+        rationale = "Executor did not approve the required risk/reward setup."
+    elif consensus_conf < config.MASTER_CONSENSUS_MIN_CONFIDENCE:
+        rationale = "Consensus confidence is below the master threshold."
+    else:
+        rationale = "Consensus and Executor approval aligned."
+    master = MasterDecision(
+        signal=consensus if approved_master else "hold",
+        confidence=consensus_conf,
+        approved=approved_master,
+        disagreement=disagreement,
+        buy_weight=round(buy_w, 2),
+        sell_weight=round(sell_w, 2),
+        total_weight=round(total_w, 2),
+        rationale=rationale,
+    )
 
     return MultiAgentResearch(
         symbol=symbol,
@@ -468,4 +574,243 @@ def run_multi_agent_research(
         stop_loss=claude_result.stop_loss if claude_result else None,
         take_profit=claude_result.price_target if claude_result else None,
         risk_reward_ratio=claude_result.risk_reward_ratio if claude_result else None,
+        master_decision=master,
     )
+
+
+# ── NexoSignal Lens: External Intelligence Layer ──────────────────────────
+
+
+def parse_insider_filings(symbol: str, max_filings: int = 10) -> list[dict]:
+    """
+    NexoSignal Lens — fetch recent Form 4 insider filings from SEC EDGAR (free).
+    Uses the EDGAR full-text search API — no authentication required.
+
+    Returns: list of {insider_name, title, transaction_type, shares, value, filed_at}
+    """
+    try:
+        # Resolve ticker → CIK via EDGAR company tickers JSON (one cached call)
+        tickers_resp = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": "NexoSignal research@nexosignal.ai"},
+            timeout=10,
+        )
+        if not tickers_resp.ok:
+            logger.warning("Lens: EDGAR tickers lookup failed %s", tickers_resp.status_code)
+            return []
+        tickers_data = tickers_resp.json()
+
+        cik: Optional[str] = None
+        for entry in tickers_data.values():
+            if str(entry.get("ticker", "")).upper() == symbol.upper():
+                cik = str(entry["cik_str"]).zfill(10)
+                break
+
+        if not cik:
+            logger.info("Lens: CIK not found for %s in EDGAR", symbol)
+            return []
+
+        # Fetch recent filings for this CIK
+        submissions_resp = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers={"User-Agent": "NexoSignal research@nexosignal.ai"},
+            timeout=15,
+        )
+        if not submissions_resp.ok:
+            return []
+        submissions = submissions_resp.json()
+
+        recent = submissions.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        filed_dates = recent.get("filingDate", [])
+        accession_numbers = recent.get("accessionNumber", [])
+
+        results: list[dict] = []
+        for form, filed_date, accession in zip(forms, filed_dates, accession_numbers):
+            if form != "4":
+                continue
+            acc_clean = accession.replace("-", "")
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{accession}.txt"
+            try:
+                raw_resp = requests.get(
+                    filing_url,
+                    headers={"User-Agent": "NexoSignal research@nexosignal.ai"},
+                    timeout=10,
+                )
+                text = raw_resp.text if raw_resp.ok else ""
+            except Exception:
+                text = ""
+
+            # Extract key fields from Form 4 XML/text via simple patterns
+            insider_name = _extract_tag(text, "rptOwnerName") or "Unknown"
+            title = _extract_tag(text, "officerTitle") or ""
+            tx_code = _extract_tag(text, "transactionCode") or ""
+            tx_type = {"P": "purchase", "S": "sale", "A": "award", "F": "tax_withholding"}.get(tx_code, tx_code)
+            shares_str = _extract_tag(text, "transactionShares")
+            value_str = _extract_tag(text, "transactionPricePerShare")
+            try:
+                shares = float(shares_str) if shares_str else None
+                price_per = float(value_str) if value_str else None
+                value = round(shares * price_per, 2) if shares and price_per else None
+            except (ValueError, TypeError):
+                shares = value = None
+
+            results.append({
+                "insider_name": insider_name,
+                "title": title,
+                "transaction_type": tx_type,
+                "shares": shares,
+                "value": value,
+                "filed_at": filed_date,
+            })
+
+            if len(results) >= max_filings:
+                break
+
+        return results
+
+    except Exception as exc:
+        logger.warning("Lens: insider filing parse failed for %s: %s", symbol, exc)
+        return []
+
+
+def _extract_tag(text: str, tag: str) -> Optional[str]:
+    """Extract the content of an XML tag from Form 4 text."""
+    match = re.search(rf"<{tag}[^>]*>([^<]+)</{tag}>", text, re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def analyze_earnings(
+    symbol: str,
+    period: str,
+    eps_actual: float,
+    eps_estimate: float,
+    beat_pct: float,
+    headline: str = "",
+) -> dict:
+    """
+    NexoSignal Lens — Claude analyzes earnings quality for a single quarter.
+    Returns: {lens_summary, lens_quality_score (0-100)}
+    Falls back gracefully if Anthropic key is missing.
+    """
+    if not config.ANTHROPIC_API_KEY:
+        beat_label = "beat" if beat_pct > 0 else "miss"
+        return {
+            "lens_summary": f"{symbol} {period} EPS {beat_label} by {abs(beat_pct):.1f}% (Claude key not set)",
+            "lens_quality_score": 50.0,
+        }
+    try:
+        import anthropic as anthropic_sdk  # type: ignore
+        client = anthropic_sdk.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        prompt = (
+            f"Symbol: {symbol} | Period: {period}\n"
+            f"EPS actual: {eps_actual:.4f} | EPS estimate: {eps_estimate:.4f} | Beat: {beat_pct:+.2f}%\n"
+            f"Headline: {headline or 'N/A'}\n\n"
+            "As NexoSignal Lens, rate earnings quality 0-100 and write a 2-sentence summary.\n"
+            "Return JSON: {lens_quality_score (int 0-100), lens_summary (string)}"
+        )
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system="You analyze earnings quality for algorithmic trading. Respond only with valid JSON.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text if msg.content else "{}"
+        data = _parse_json_response(text)
+        return {
+            "lens_summary": str(data.get("lens_summary", "")),
+            "lens_quality_score": float(data.get("lens_quality_score", 50)),
+        }
+    except Exception as exc:
+        logger.warning("Lens: earnings analysis failed for %s: %s", symbol, exc)
+        return {"lens_summary": f"Analysis error: {str(exc)[:80]}", "lens_quality_score": 50.0}
+
+
+def analyze_annual_report(
+    symbol: str,
+    fiscal_year: str,
+    revenue_yoy: float,
+    filing_excerpt: str = "",
+) -> dict:
+    """
+    NexoSignal Lens — Claude evaluates a 10-K filing excerpt for moat and red flags.
+    Returns: {lens_summary, moat_score (0-100), red_flag_count}
+    """
+    if not config.ANTHROPIC_API_KEY:
+        return {
+            "lens_summary": f"{symbol} {fiscal_year} revenue YoY {revenue_yoy:+.1f}% (Claude key not set)",
+            "moat_score": 50.0,
+            "red_flag_count": 0,
+        }
+    try:
+        import anthropic as anthropic_sdk  # type: ignore
+        client = anthropic_sdk.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        excerpt = (filing_excerpt[:1500] + "…") if len(filing_excerpt) > 1500 else filing_excerpt
+        prompt = (
+            f"Symbol: {symbol} | Fiscal year: {fiscal_year} | Revenue YoY: {revenue_yoy:+.1f}%\n"
+            f"10-K excerpt:\n{excerpt or 'Not provided'}\n\n"
+            "Rate competitive moat 0-100 and count red flags (e.g., going concern, declining margins, litigation).\n"
+            "Return JSON: {moat_score (int 0-100), red_flag_count (int), lens_summary (string 2 sentences)}"
+        )
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=250,
+            system="You analyze annual reports for algorithmic trading. Respond only with valid JSON.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text if msg.content else "{}"
+        data = _parse_json_response(text)
+        return {
+            "lens_summary": str(data.get("lens_summary", "")),
+            "moat_score": float(data.get("moat_score", 50)),
+            "red_flag_count": int(data.get("red_flag_count", 0)),
+        }
+    except Exception as exc:
+        logger.warning("Lens: annual report analysis failed for %s: %s", symbol, exc)
+        return {"lens_summary": f"Analysis error: {str(exc)[:80]}", "moat_score": 50.0, "red_flag_count": 0}
+
+
+def score_sentiment(text: str) -> dict:
+    """
+    NexoSignal Lens — FinBERT sentiment scoring with keyword fallback.
+    FinBERT is tried first; if transformers is not installed the fallback
+    uses a weighted keyword dictionary (no API call, no cost).
+
+    Returns: {label: 'positive'|'negative'|'neutral', score: float 0–1}
+    """
+    # ── Try FinBERT (requires: pip install transformers torch) ────────────
+    try:
+        from transformers import pipeline  # type: ignore
+        _pipe = pipeline(
+            "sentiment-analysis",
+            model=config.FINBERT_MODEL_PATH,
+            truncation=True,
+            max_length=512,
+        )
+        result = _pipe(text[:512])[0]
+        return {"label": result["label"].lower(), "score": round(result["score"], 4)}
+    except Exception:
+        pass  # fall through to keyword fallback
+
+    # ── Keyword fallback ──────────────────────────────────────────────────
+    POSITIVE = {"beat", "surged", "rallied", "upgrade", "outperform", "record", "growth",
+                "profit", "raised", "strong", "buy", "bullish", "dividend", "expansion"}
+    NEGATIVE = {"miss", "plunged", "downgrade", "underperform", "loss", "cut", "weak",
+                "decline", "sell", "bearish", "layoff", "lawsuit", "bankruptcy", "recall"}
+
+    words = set(re.findall(r"\b\w+\b", text.lower()))
+    pos = len(words & POSITIVE)
+    neg = len(words & NEGATIVE)
+    total = pos + neg + 1  # avoid zero division
+
+    if pos > neg:
+        label = "positive"
+        score = min(1.0, 0.5 + (pos - neg) / total * 0.5)
+    elif neg > pos:
+        label = "negative"
+        score = min(1.0, 0.5 + (neg - pos) / total * 0.5)
+    else:
+        label = "neutral"
+        score = 0.5
+
+    return {"label": label, "score": round(score, 4)}

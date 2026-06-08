@@ -416,7 +416,97 @@ document.addEventListener("DOMContentLoaded", () => {
   if (log) log.scrollTop = log.scrollHeight;
 });
 
+// ── Intelligence Panel (Phase 2) ───────────────────────────────────────────
+
+async function refreshIntelligence() {
+  try {
+    const res = await fetch("/api/intelligence");
+    if (!res.ok) return;
+    const data = await res.json();
+
+    // Macro
+    if (data.macro) {
+      const m = data.macro;
+      const regime = (m.regime || "neutral").replace("_", " ").toUpperCase();
+      const pill = document.getElementById("regime-pill");
+      if (pill) {
+        pill.textContent = regime;
+        pill.className = "pill " + (
+          m.regime === "risk_on" ? "chip-good" :
+          ["risk_off", "stagflation"].includes(m.regime) ? "chip-bad" : "chip-muted"
+        );
+      }
+      _setText("macro-dgs10", m.dgs10 != null ? m.dgs10.toFixed(2) + "%" : "—");
+      _setText("macro-dgs2",  m.dgs2  != null ? m.dgs2.toFixed(2)  + "%" : "—");
+      _setText("macro-spread", m.spread != null ? (m.spread >= 0 ? "+" : "") + m.spread.toFixed(3) + "%" : "—");
+      _setText("macro-claims", m.jobless_claims != null ? m.jobless_claims.toLocaleString() : "—");
+    }
+
+    // Watchlist leaderboard
+    if (Array.isArray(data.watchlist) && data.watchlist.length > 0) {
+      const tbody = document.getElementById("watchlist-tbody");
+      if (tbody) {
+        tbody.innerHTML = data.watchlist.slice(0, 15).map(w => `
+          <tr>
+            <td class="muted">${w.rank_position}</td>
+            <td><strong>${w.symbol}</strong></td>
+            <td><span class="pill chip-muted" style="font-size:10px">${w.category || "—"}</span></td>
+            <td>
+              <div class="score-bar">
+                <div class="score-fill" style="width:${Math.round(w.composite_score || 0)}%"></div>
+                <span>${Math.round(w.composite_score || 0)}</span>
+              </div>
+            </td>
+            <td class="muted">${Math.round(w.score_growth || 0)}</td>
+            <td class="muted">${Math.round(w.score_value  || 0)}</td>
+            <td class="muted">${Math.round(w.score_sentiment || 0)}</td>
+          </tr>
+        `).join("");
+      }
+    }
+
+    // Insider feed
+    if (Array.isArray(data.insiders)) {
+      const feed = document.getElementById("insider-feed");
+      if (feed) {
+        if (data.insiders.length === 0) {
+          feed.innerHTML = '<div class="empty">No insider filings yet — Lens parses SEC EDGAR weekday 6 PM ET</div>';
+        } else {
+          feed.innerHTML = data.insiders.map(ins => {
+            const cls = ins.transaction_type === "purchase" ? "insider-buy" :
+                        ins.transaction_type === "sale" ? "insider-sell" : "";
+            const pillCls = ins.transaction_type === "purchase" ? "chip-good" :
+                            ins.transaction_type === "sale" ? "chip-bad" : "chip-muted";
+            const shares = ins.shares ? ` ${ins.shares.toLocaleString()} shares` : "";
+            const date = ins.filed_at ? ins.filed_at.slice(0, 10) : "";
+            return `<div class="insider-row ${cls}">
+              <div class="insider-symbol">${ins.symbol}</div>
+              <div class="insider-details">
+                <strong>${ins.insider_name || "Unknown"}</strong>
+                <span class="muted">${ins.title || ""}</span>
+              </div>
+              <div class="insider-tx">
+                <span class="pill ${pillCls}" style="font-size:10px">${ins.transaction_type || "?"}</span>
+                <span class="muted" style="font-size:11px">${shares}</span>
+              </div>
+              <div class="muted" style="font-size:11px">${date}</div>
+            </div>`;
+          }).join("");
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Intelligence panel refresh failed:", err);
+  }
+}
+
+function _setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
 // Expose for inline onclick handlers
-window.runAIResearch  = runAIResearch;
-window.fetchRCPrice   = fetchRCPrice;
-window.calcRiskReward = calcRiskReward;
+window.runAIResearch       = runAIResearch;
+window.fetchRCPrice        = fetchRCPrice;
+window.calcRiskReward      = calcRiskReward;
+window.refreshIntelligence = refreshIntelligence;

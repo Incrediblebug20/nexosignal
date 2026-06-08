@@ -22,6 +22,11 @@ from trading_agent.storage import (
     record_wallet_connection,
     signal_summary,
     trade_summary,
+    list_watchlist,
+    latest_macro_snapshot,
+    list_insider_activity,
+    list_risk_metrics,
+    list_performance_events,
 )
 from trading_agent.strategy import STRATEGIES
 
@@ -56,8 +61,11 @@ def inject_app_config():
     return {"config": config}
 
 
-def password_matches(raw_password: str) -> bool:
-    expected = config.DASHBOARD_PASSWORD
+def authenticate_user(username: str, raw_password: str) -> bool:
+    users = config.DASHBOARD_USERS
+    if username not in users:
+        return False
+    expected = users[username]
     if expected.startswith(("pbkdf2:", "scrypt:")):
         return check_password_hash(expected, raw_password)
     return raw_password == expected
@@ -118,13 +126,15 @@ def current_agent_status() -> dict:
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        if config.DASHBOARD_PASSWORD == "change-me":
-            flash("Set DASHBOARD_PASSWORD in .env before using the dashboard.", "error")
-            return render_template("login.html")
-        username = request.form.get("username", "")
+        username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        if username == config.DASHBOARD_USERNAME and password_matches(password):
+        stored = config.DASHBOARD_USERS.get(username)
+        if stored == "change-me":
+            flash("Set DASHBOARD_PASSWORD (or DASHBOARD_USERS) in .env before using the dashboard.", "error")
+            return render_template("login.html")
+        if authenticate_user(username, password):
             session["logged_in"] = True
+            session["username"] = username
             return redirect(request.args.get("next") or url_for("dashboard"))
         flash("Invalid username or password.", "error")
     return render_template("login.html")
@@ -181,6 +191,11 @@ def dashboard():
         signal_summary=signal_summary(),
         config=config,
         strategies=sorted(STRATEGIES.keys()),
+        watchlist=list_watchlist(30),
+        macro=latest_macro_snapshot(),
+        insiders=list_insider_activity(10),
+        risk_metrics=list_risk_metrics(20),
+        performance_events=list_performance_events(25),
     )
 
 
@@ -504,6 +519,7 @@ def api_ai_research(symbol: str):
             "take_profit": research.take_profit,
             "risk_reward_ratio": research.risk_reward_ratio,
             "min_ratio_required": config.AI_MIN_RISK_REWARD_RATIO,
+            "master_decision": asdict(research.master_decision) if research.master_decision else None,
             "technical": {
                 "base_signal": decision.base_signal,
                 "final_signal": decision.final_signal,
@@ -542,6 +558,72 @@ def api_price(symbol: str):
         return jsonify({"symbol": symbol, "price": price, "atr": atr})
     except BrokerError as exc:
         return jsonify({"error": str(exc)}), 503
+
+
+# ─── Intelligence Panel routes (Phase 2) ────────────────────────────────────
+
+@app.get("/api/intelligence")
+@login_required
+def api_intelligence():
+    """Aggregate endpoint: watchlist, macro, insiders, risk — for the Intelligence Panel."""
+    try:
+        watchlist = list_watchlist(30)
+        macro = latest_macro_snapshot()
+        insiders = list_insider_activity(10)
+        risk = list_risk_metrics(20)
+        telemetry = list_performance_events(25)
+        return jsonify({
+            "watchlist": watchlist,
+            "macro": macro,
+            "insiders": insiders,
+            "risk": risk,
+            "telemetry": telemetry,
+        })
+    except Exception as exc:
+        logger.exception("Intelligence panel data fetch failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/watchlist")
+@login_required
+def api_watchlist():
+    """NexoSignal Scout watchlist leaderboard."""
+    try:
+        return jsonify(list_watchlist(50))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/macro")
+@login_required
+def api_macro():
+    """Latest NexoSignal Lens macro snapshot."""
+    try:
+        snap = latest_macro_snapshot()
+        return jsonify(snap or {})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/insiders")
+@login_required
+def api_insiders():
+    """Recent SEC Form 4 insider activity parsed by NexoSignal Lens."""
+    symbol = request.args.get("symbol")
+    try:
+        return jsonify(list_insider_activity(25, symbol=symbol))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/performance")
+@login_required
+def api_performance():
+    """NexoSignal Telemetry: latency, slippage, win-rate, PnL, and uptime snapshots."""
+    try:
+        return jsonify(list_performance_events(100))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.cli.command("hash-password")

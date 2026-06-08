@@ -5,9 +5,6 @@
   <div class="notice error">{{ connection_error }}</div>
 {% endif %}
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  HERO                                                                  -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
 <section class="dashboard-hero" id="overview">
   <div>
     <p class="eyebrow">NexoSignal Operations Center</p>
@@ -28,65 +25,63 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  KEY METRICS                                                            -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Key Metrics</div>
+{% set ns = namespace(upl=0.0) %}
+{% for p in positions %}{% set ns.upl = ns.upl + p.unrealized_pl|float %}{% endfor %}
 <section class="metrics">
-  <div class="metric">
+  <div class="metric metric--blue">
     <span class="metric-label">Portfolio</span>
     <strong class="metric-value" id="m-portfolio">
       {% if account %}${{ "%.2f"|format(account.portfolio_value|float) }}{% else %}—{% endif %}
     </strong>
     <span class="metric-sub">Total value</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--green">
     <span class="metric-label">Cash</span>
     <strong class="metric-value" id="m-cash">
       {% if account %}${{ "%.2f"|format(account.cash|float) }}{% else %}—{% endif %}
     </strong>
     <span class="metric-sub">Available</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--blue">
     <span class="metric-label">Buying Power</span>
     <strong class="metric-value" id="m-bp">
       {% if account %}${{ "%.2f"|format(account.buying_power|float) }}{% else %}—{% endif %}
     </strong>
     <span class="metric-sub">Alpaca</span>
   </div>
-  <div class="metric">
+  <div class="metric {{ 'metric--green' if ns.upl >= 0 else 'metric--red' }}">
     <span class="metric-label">Unrealized P&amp;L</span>
     <strong class="metric-value" id="m-upl">
-      {% set ns = namespace(upl=0.0) %}
-      {% for p in positions %}{% set ns.upl = ns.upl + p.unrealized_pl|float %}{% endfor %}
       <span class="{{ 'good' if ns.upl >= 0 else 'bad' }}">
         ${{ "%.2f"|format(ns.upl) }}
       </span>
     </strong>
     <span class="metric-sub">Open positions</span>
   </div>
-  <div class="metric">
+  <div class="metric {{ 'metric--green' if clock and clock.is_open else 'metric--red' }}">
     <span class="metric-label">Market</span>
     <strong class="metric-value {{ 'good' if clock and clock.is_open else 'bad' }}">
       {{ "OPEN" if clock and clock.is_open else "CLOSED" }}
     </strong>
     <span class="metric-sub">NYSE/NASDAQ</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--purple">
     <span class="metric-label">Trades Today</span>
     <strong class="metric-value">{{ summary.total or 0 }}</strong>
     <span class="metric-sub">NexoSignal Ledger</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--blue">
     <span class="metric-label">Total Signals</span>
     <strong class="metric-value">{{ signal_summary.total or 0 }}</strong>
     <span class="metric-sub">NexoSignal AlphaCore</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--green">
     <span class="metric-label">Approved</span>
     <strong class="metric-value good">{{ signal_summary.approved or 0 }}</strong>
     <span class="metric-sub">Guard approved</span>
   </div>
-  <div class="metric">
+  <div class="metric metric--purple">
     <span class="metric-label">Avg Confidence</span>
     <strong class="metric-value">
       {% if signal_summary.avg_confidence %}
@@ -97,9 +92,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  ANALYTICS CHARTS                                                       -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Analytics</div>
 <section class="charts-row" id="analytics">
   <div class="chart-card">
     <div class="chart-head">
@@ -132,9 +125,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  MULTI-AGENT AI RESEARCH PANEL                                         -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">AI Research</div>
 <section class="panel ai-section" id="ai-research">
   <div class="panel-head">
     <h2>NexoSignal Research Console</h2>
@@ -281,9 +272,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  TRADING CONTROLS                                                       -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Trading Controls</div>
 <section class="grid three" id="controls">
   <!-- NexoSignal Agent Control -->
   <div class="panel">
@@ -416,9 +405,200 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  POSITIONS & ORDERS                                                     -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Intelligence</div>
+<section class="panel intel-panel" id="intelligence">
+  <div class="panel-head">
+    <h2>NexoSignal Intelligence Panel</h2>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="pill chip-muted">Scout · Lens · Guard</span>
+      <button class="ghost small" type="button" onclick="refreshIntelligence()">Refresh</button>
+    </div>
+  </div>
+
+  <div class="intel-grid">
+
+    <!-- ── Macro Regime ──────────────────────────────────────────────── -->
+    <div class="intel-card">
+      <div class="intel-card-head">
+        <span class="intel-label">Macro Regime</span>
+        <span class="pill {% if macro and macro.regime == 'risk_on' %}chip-good{% elif macro and macro.regime in ('risk_off', 'stagflation') %}chip-bad{% else %}chip-muted{% endif %}" id="regime-pill">
+          {{ macro.regime.replace('_', ' ').upper() if macro else 'NO DATA' }}
+        </span>
+      </div>
+      <div class="intel-macro-row">
+        <div class="intel-stat">
+          <span>10yr Yield</span>
+          <strong id="macro-dgs10">{{ "%.2f%%"|format(macro.dgs10) if macro and macro.dgs10 else "—" }}</strong>
+        </div>
+        <div class="intel-stat">
+          <span>2yr Yield</span>
+          <strong id="macro-dgs2">{{ "%.2f%%"|format(macro.dgs2) if macro and macro.dgs2 else "—" }}</strong>
+        </div>
+        <div class="intel-stat">
+          <span>Spread</span>
+          <strong id="macro-spread" class="{{ 'bad' if macro and macro.spread is not none and macro.spread < 0 else 'good' }}">
+            {{ "%+.3f%%"|format(macro.spread) if macro and macro.spread is not none else "—" }}
+          </strong>
+        </div>
+        <div class="intel-stat">
+          <span>Jobless Claims</span>
+          <strong id="macro-claims">
+            {{ "{:,.0f}".format(macro.jobless_claims) if macro and macro.jobless_claims else "—" }}
+          </strong>
+        </div>
+      </div>
+      <div class="intel-caption">
+        Refreshed every Sunday 8 AM ET via FRED API · Regime drives Black-Litterman weight tilt
+      </div>
+    </div>
+
+    <!-- ── Scout Watchlist Leaderboard ──────────────────────────────── -->
+    <div class="intel-card intel-card--wide">
+      <div class="intel-card-head">
+        <span class="intel-label">Scout Watchlist</span>
+        <span class="pill chip-muted">Rebuilt every Saturday 8 AM</span>
+      </div>
+      <div class="table-wrap">
+        <table class="intel-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Symbol</th><th>Category</th>
+              <th>Score</th><th>Growth</th><th>Value</th><th>Sentiment</th>
+            </tr>
+          </thead>
+          <tbody id="watchlist-tbody">
+            {% for w in watchlist[:15] %}
+              <tr>
+                <td class="muted">{{ w.rank_position }}</td>
+                <td><strong>{{ w.symbol }}</strong></td>
+                <td><span class="pill chip-muted" style="font-size:10px">{{ w.category or '—' }}</span></td>
+                <td>
+                  <div class="score-bar">
+                    <div class="score-fill" style="width:{{ w.composite_score or 0 }}%"></div>
+                    <span>{{ "%.0f"|format(w.composite_score or 0) }}</span>
+                  </div>
+                </td>
+                <td class="muted">{{ "%.0f"|format(w.score_growth or 0) }}</td>
+                <td class="muted">{{ "%.0f"|format(w.score_value or 0) }}</td>
+                <td class="muted">{{ "%.0f"|format(w.score_sentiment or 0) }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="empty">No watchlist yet — Scout runs Saturday 8 AM ET</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Insider Activity Feed ────────────────────────────────────── -->
+    <div class="intel-card">
+      <div class="intel-card-head">
+        <span class="intel-label">Insider Activity</span>
+        <span class="pill chip-muted">SEC Form 4 · Parsed 6 PM ET</span>
+      </div>
+      <div class="insider-feed" id="insider-feed">
+        {% for ins in insiders %}
+          <div class="insider-row {{ 'insider-buy' if ins.transaction_type == 'purchase' else 'insider-sell' if ins.transaction_type == 'sale' else '' }}">
+            <div class="insider-symbol">{{ ins.symbol }}</div>
+            <div class="insider-details">
+              <strong>{{ ins.insider_name or 'Unknown' }}</strong>
+              <span class="muted">{{ ins.title or '' }}</span>
+            </div>
+            <div class="insider-tx">
+              <span class="pill {{ 'chip-good' if ins.transaction_type == 'purchase' else 'chip-bad' if ins.transaction_type == 'sale' else 'chip-muted' }}">
+                {{ ins.transaction_type or '?' }}
+              </span>
+              {% if ins.shares %}
+                <span class="muted" style="font-size:11px">{{ "{:,.0f}".format(ins.shares) }} shares</span>
+              {% endif %}
+            </div>
+            <div class="muted" style="font-size:11px">{{ ins.filed_at[:10] if ins.filed_at else '' }}</div>
+          </div>
+        {% else %}
+          <div class="empty">No insider filings yet — Lens parses SEC EDGAR weekday 6 PM ET</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- ── Guard Risk Dashboard ─────────────────────────────────────── -->
+    <div class="intel-card">
+      <div class="intel-card-head">
+        <span class="intel-label">Guard Risk Metrics</span>
+        <span class="pill chip-muted">VaR · Correlation · Portfolio limit {{ (config.MAX_PORTFOLIO_VAR * 100)|int }}%</span>
+      </div>
+      <div class="table-wrap">
+        <table class="intel-table">
+          <thead>
+            <tr><th>Symbol</th><th>1-Day VaR $</th><th>VaR %</th><th>Corr Flag</th></tr>
+          </thead>
+          <tbody>
+            {% for r in risk_metrics[:10] %}
+              <tr>
+                <td><strong>{{ r.symbol }}</strong></td>
+                <td>${{ "%.2f"|format(r.var_1d or 0) }}</td>
+                <td class="{{ 'bad' if (r.var_1d_pct or 0) > 0.03 else '' }}">
+                  {{ "%.2f%%"|format((r.var_1d_pct or 0) * 100) }}
+                </td>
+                <td>
+                  {% if r.correlation_flag %}
+                    <span class="pill chip-bad" style="font-size:10px">FLAGGED</span>
+                  {% else %}
+                    <span class="pill chip-good" style="font-size:10px">OK</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="empty">No risk metrics computed yet</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="intel-caption">
+        VaR = 1.65σ × ATR × qty (95% confidence) · Correlation guard uses static sector buckets
+      </div>
+    </div>
+
+    <div class="intel-card intel-card--wide">
+      <div class="intel-card-head">
+        <span class="intel-label">Telemetry</span>
+        <span class="pill chip-muted">Latency · Slippage · Win Rate · PnL</span>
+      </div>
+      <div class="table-wrap">
+        <table class="intel-table">
+          <thead>
+            <tr>
+              <th>Stage</th><th>Symbol</th><th>Latency</th><th>Slippage</th>
+              <th>Win Rate</th><th>PnL</th><th>Uptime</th>
+            </tr>
+          </thead>
+          <tbody id="telemetry-tbody">
+            {% for e in performance_events[:10] %}
+              <tr>
+                <td><strong>{{ e.stage }}</strong></td>
+                <td>{{ e.symbol or "ALL" }}</td>
+                <td>{{ "%.0f ms"|format(e.latency_ms) if e.latency_ms is not none else "—" }}</td>
+                <td>{{ "%.2f bps"|format(e.slippage_bps) if e.slippage_bps is not none else "—" }}</td>
+                <td>{{ "%.1f%%"|format(e.win_rate) if e.win_rate is not none else "—" }}</td>
+                <td class="{{ 'good' if (e.mark_to_market_pnl or 0) >= 0 else 'bad' }}">
+                  {{ "$%.2f"|format(e.mark_to_market_pnl) if e.mark_to_market_pnl is not none else "—" }}
+                </td>
+                <td>{{ e.uptime_seconds or 0 }}s</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="empty">No telemetry yet - start a dry-run scan to generate efficiency data</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="intel-caption">
+        Use dry run first. Win rate here is operational acceptance rate until closed-trade PnL outcomes are reconciled.
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="section-label">Portfolio</div>
 <section class="grid two" id="positions">
   <div class="panel">
     <div class="panel-head">
@@ -481,9 +661,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  GUARDRAILS + WALLET                                                    -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Risk &amp; Wallet</div>
 <section class="grid two">
   <div class="panel accent-panel">
     <div class="panel-head">
@@ -536,9 +714,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  BROKERAGE CONNECTIONS                                                  -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Brokerage Connections</div>
 <section class="panel" id="brokerages">
   <div class="panel-head"><h2>Brokerage Connections</h2></div>
   <form class="form-grid" method="post" action="{{ url_for('add_brokerage_connection') }}">
@@ -601,9 +777,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  NEXOSIGNAL ALPHACORE                                                   -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Signal Activity</div>
 <section class="panel" id="signals">
   <div class="panel-head">
     <h2>NexoSignal AlphaCore</h2>
@@ -653,9 +827,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  TRADE HISTORY                                                          -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">Trade History</div>
 <section class="panel" id="trades">
   <div class="panel-head">
     <h2>NexoSignal Ledger Trade Events</h2>
@@ -694,9 +866,7 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!--  NEXOSIGNAL AGENT LOG                                                   -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-label">System Log</div>
 <section class="panel">
   <div class="panel-head">
     <h2>NexoSignal Agent Log</h2>

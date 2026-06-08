@@ -108,3 +108,117 @@ create index if not exists agent_events_created_at_idx
     on agent_events (created_at desc);
 
 alter table agent_events enable row level security;
+
+-- ── NexoSignal Phase 2 Intelligence Extension ─────────────────────────────
+
+-- NexoSignal Scout: dynamic watchlist, rebuilt every Saturday 8 AM
+create table if not exists watchlist (
+    id bigserial primary key,
+    symbol text not null unique,
+    score_growth double precision,
+    score_value double precision,
+    score_yield double precision,
+    score_sentiment double precision,
+    score_insider double precision,
+    score_earnings_quality double precision,
+    composite_score double precision,
+    category text,
+    rank_position integer,
+    last_rebuild_at timestamptz
+);
+
+create index if not exists watchlist_composite_idx on watchlist (composite_score desc);
+alter table watchlist enable row level security;
+
+-- NexoSignal Lens: macro regime snapshots, refreshed every Sunday 8 AM
+create table if not exists macro_snapshots (
+    id bigserial primary key,
+    captured_at timestamptz not null,
+    dgs10 double precision,
+    dgs2 double precision,
+    spread double precision,
+    jobless_claims double precision,
+    regime text not null
+);
+
+create index if not exists macro_snapshots_captured_at_idx on macro_snapshots (captured_at desc);
+alter table macro_snapshots enable row level security;
+
+-- NexoSignal Lens: SEC EDGAR Form 4 insider filings, parsed every weekday 6 PM
+create table if not exists insider_activity (
+    id bigserial primary key,
+    filed_at timestamptz not null,
+    symbol text not null,
+    insider_name text,
+    title text,
+    transaction_type text,
+    shares double precision,
+    value double precision
+);
+
+create index if not exists insider_activity_symbol_idx on insider_activity (symbol, filed_at desc);
+alter table insider_activity enable row level security;
+
+-- NexoSignal Lens: earnings quality analysis results
+create table if not exists earnings_analysis (
+    id bigserial primary key,
+    analyzed_at timestamptz not null,
+    symbol text not null,
+    period text,
+    eps_actual double precision,
+    eps_estimate double precision,
+    beat_pct double precision,
+    lens_summary text,
+    lens_quality_score double precision
+);
+
+create index if not exists earnings_analysis_symbol_idx on earnings_analysis (symbol, analyzed_at desc);
+alter table earnings_analysis enable row level security;
+
+-- NexoSignal Lens: annual report (10-K) analysis results
+create table if not exists annual_report_analysis (
+    id bigserial primary key,
+    analyzed_at timestamptz not null,
+    symbol text not null,
+    fiscal_year text,
+    revenue_yoy double precision,
+    moat_score double precision,
+    red_flag_count integer,
+    lens_summary text
+);
+
+create index if not exists annual_report_symbol_idx on annual_report_analysis (symbol, analyzed_at desc);
+alter table annual_report_analysis enable row level security;
+
+-- NexoSignal Guard: per-position and portfolio VaR risk metrics
+create table if not exists risk_metrics (
+    id bigserial primary key,
+    checked_at timestamptz not null,
+    symbol text not null,
+    var_1d double precision,
+    var_1d_pct double precision,
+    portfolio_var double precision,
+    correlation_flag boolean not null default false
+);
+
+create index if not exists risk_metrics_symbol_idx on risk_metrics (symbol, checked_at desc);
+alter table risk_metrics enable row level security;
+
+-- NexoSignal Telemetry: latency, slippage, PnL, win-rate, and uptime snapshots
+create table if not exists performance_events (
+    id bigserial primary key,
+    created_at timestamptz not null,
+    stage text not null,
+    symbol text,
+    latency_ms double precision,
+    slippage_bps double precision,
+    mark_to_market_pnl double precision,
+    realized_pnl double precision,
+    win_rate double precision,
+    trade_count integer,
+    uptime_seconds integer,
+    payload_json jsonb
+);
+
+create index if not exists performance_events_created_at_idx on performance_events (created_at desc);
+alter table performance_events enable row level security;

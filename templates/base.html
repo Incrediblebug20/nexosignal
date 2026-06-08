@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ config.DASHBOARD_BRAND_NAME }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  <!-- Chart.js for analytics panels -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <script defer src="{{ url_for('static', filename='metamask.js') }}"></script>
@@ -25,18 +24,28 @@
         <a href="#overview">Overview</a>
         <a href="#analytics">AlphaCore</a>
         <a href="#ai-research">AI Research</a>
+        <a href="#intelligence">Intelligence</a>
         <a href="#controls">Controls</a>
         <a href="#positions">Positions</a>
         <a href="#signals">Signals</a>
         <a href="#trades">Ledger</a>
       </nav>
-      <form method="post" action="{{ url_for('logout') }}">
-        <button class="ghost" type="submit">Logout</button>
-      </form>
+      <div class="topbar-user">
+        {% if session.get("username") %}
+          <div class="user-chip">
+            <span class="user-avatar">{{ session["username"][0]|upper }}</span>
+            <span class="user-name">{{ session["username"] }}</span>
+          </div>
+        {% endif %}
+        <form method="post" action="{{ url_for('logout') }}">
+          <button class="ghost small" type="submit">Sign out</button>
+        </form>
+      </div>
     {% endif %}
   </header>
 
   <main class="page">
+    {% block flash %}
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <div class="flash-stack">
@@ -46,6 +55,7 @@
         </div>
       {% endif %}
     {% endwith %}
+    {% endblock %}
     {% block content %}{% endblock %}
   </main>
 </body>

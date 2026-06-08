@@ -6,6 +6,7 @@ for each watched symbol, and places orders when signalled.
 import logging
 import math
 import asyncio
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, time as clock_time
@@ -20,10 +21,36 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
 
 from .broker import AlpacaBroker, BrokerError, TelegramNotifier
 from . import config
-from .restrictions import RejectedOrder, get_tracker
-from .signal_engine import analyze_signal, compute_atr, run_alphacore_pipeline
-from .storage import record_agent_event, record_signal_event, record_trade_event, trade_summary
-from .strategy import BaseStrategy, get_strategy
+from .restrictions import (
+    RejectedOrder,
+    calculate_position_risk,
+    check_correlation,
+    check_portfolio_var,
+    get_tracker,
+)
+from .signal_engine import (
+    NexoSignalAlphaCoreCandidate,
+    analyze_signal,
+    alphacore_features,
+    compute_confluence_score,
+    compute_vwap,
+)
+from .storage import (
+    record_agent_event, record_signal_event, record_trade_event, trade_summary,
+    upsert_watchlist_entry, record_macro_snapshot, record_insider_activity,
+    list_watchlist, list_insider_activity,
+    record_performance_event, record_risk_metrics,
+)
+from .strategy import (
+    BaseStrategy,
+    asset_type_for_symbol,
+    calculate_bl_weights,
+    detect_market_regime,
+    get_strategy,
+    normalize_symbol,
+    rebuild_watchlist,
+    should_skip_for_earnings,
+)
 
 logger = logging.getLogger("trading_agent")
 logging.basicConfig(level=logging.INFO)
@@ -67,6 +94,7 @@ class NexoSignalAgent:
         self.autonomous_orders: dict[str, dict] = {}
         self.session_trade_attempts = 0
         self.trade_floor_logged = False
+        self.started_at = time.time()
 
     def _log(self, msg: str, level: str = "info", event_type: str = "agent_log", symbol: str | None = None, payload: dict | None = None) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -87,6 +115,7 @@ class NexoSignalAgent:
 
     def evaluate_symbol(self, symbol: str) -> Optional[str]:
         """Fetch bars, run strategy, return order id or None."""
+        started = time.perf_counter()
         bars = self.broker.get_bars(symbol, timeframe="1Min", limit=60)
         if not bars:
             self._log(f"{symbol}: no bar data available", "warning")
@@ -112,6 +141,17 @@ class NexoSignalAgent:
         self._log(
             f"{symbol} @ ${price:.2f} -> base={base_signal.upper()} "
             f"final={signal.upper()} confidence={decision.confidence:.0f}"
+        )
+        self._record_telemetry(
+            stage="symbol_evaluation",
+            symbol=symbol,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            payload={
+                "base_signal": base_signal,
+                "final_signal": signal,
+                "confidence": decision.confidence,
+                "approved": decision.approved,
+            },
         )
 
         if signal == "hold":
@@ -211,34 +251,121 @@ class NexoSignalAgent:
         if not self.broker.is_market_open():
             self._log("NexoSignal Agent stopped market-open scan because Alpaca clock is closed", "warning", "market_closed")
             return
-        try:
-            picks = asyncio.run(
-                run_alphacore_pipeline(
-                    snapshot=asyncio.run(self.broker.get_bulk_snapshots()),
-                    headers=self.broker._headers,
-                    data_base=self.broker._data_base,
-                    emit_update=lambda payload: self._emit_confluence(payload),
-                    max_candidates=5,
-                )
-            )
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            snapshot = loop.run_until_complete(self.broker.get_bulk_snapshots())
-            picks = loop.run_until_complete(
-                run_alphacore_pipeline(
-                    snapshot=snapshot,
-                    headers=self.broker._headers,
-                    data_base=self.broker._data_base,
-                    emit_update=lambda payload: self._emit_confluence(payload),
-                    max_candidates=5,
-                )
-            )
-            loop.close()
-        self._log(f"NexoSignal AlphaCore produced {len(picks)} alpha picks", event_type="alphacore_picks", payload={"count": len(picks)})
+        picks = self._run_market_open_pipeline()
+        self._log(f"NexoSignal AlphaCore selected {len(picks)} daily alpha picks", event_type="alphacore_picks", payload={"count": len(picks)})
         self.notifier.daily_picks_alert(picks)
+        regime = detect_market_regime(config.FRED_API_KEY).get("regime", "neutral")
+        weights = calculate_bl_weights(picks, regime)
         for pick in picks:
-            self.execute_alpha_pick(pick)
+            self.execute_alpha_pick(pick, allocation_weight=weights.get(pick.symbol, 1 / max(len(picks), 1)))
+
+    async def _market_open_pipeline(self) -> list[NexoSignalAlphaCoreCandidate]:
+        return self._build_daily_top_picks()
+
+    def _build_daily_top_picks(self) -> list[NexoSignalAlphaCoreCandidate]:
+        watchlist = list_watchlist(50)
+        symbols = [normalize_symbol(str(row.get("symbol", ""))) for row in watchlist if row.get("symbol")]
+        if not symbols:
+            symbols = [normalize_symbol(s) for s in self.symbols]
+            self._log("NexoSignal AlphaCore using dashboard symbols because watchlist is empty", "warning", "watchlist_empty")
+
+        candidates: list[NexoSignalAlphaCoreCandidate] = []
+        for symbol in dict.fromkeys(symbols):
+            asset_type = asset_type_for_symbol(symbol)
+            should_skip, reason = should_skip_for_earnings(symbol)
+            if should_skip:
+                self._log(
+                    f"NexoSignal AlphaCore omitted {symbol}: {reason}",
+                    "warning",
+                    "earnings_filter_skip",
+                    symbol,
+                    {"asset_type": asset_type, "reason": reason},
+                )
+                continue
+            if asset_type == "crypto":
+                self._log(
+                    f"NexoSignal AlphaCore routed {symbol} as crypto; corporate earnings check bypassed",
+                    event_type="asset_routed",
+                    symbol=symbol,
+                    payload={"asset_type": asset_type},
+                )
+
+            try:
+                bars = self.broker.get_bars(symbol, timeframe="1Day", limit=80)
+                if len(bars) < 50:
+                    self._log(f"{symbol}: insufficient bars for AlphaCore ({len(bars)}/50)", "warning", "alphacore_skip", symbol)
+                    continue
+                confluence = compute_confluence_score(bars)
+                if confluence < config.SIGNAL_MIN_CONFIDENCE:
+                    self._emit_confluence({
+                        "symbol": symbol,
+                        "confluence_score": round(confluence, 2),
+                        "order_book_imbalance": 0.0,
+                        "asset_type": asset_type,
+                    })
+                    continue
+                features = alphacore_features(bars)
+                price = float(bars[-1]["c"])
+                probability = max(0.01, min(0.99, confluence / 100.0))
+                candidate = NexoSignalAlphaCoreCandidate(
+                    symbol=symbol,
+                    price=round(price, 4),
+                    volume=float(bars[-1].get("v") or 0),
+                    confluence_score=round(confluence, 2),
+                    order_book_imbalance=0.0,
+                    probability=round(probability, 4),
+                    atr=round(features["atr"], 4),
+                    vwap=round(compute_vwap(bars), 4),
+                    rsi=round(features["rsi"], 2),
+                    sma_slope_delta=round(features["sma_slope_delta"], 4),
+                    ema_trend_delta=round(features["ema_trend_delta"], 4),
+                    macd_histogram=round(features["macd_histogram"], 4),
+                    liquidity_score=70.0,
+                    spread_bps=0.0,
+                    slippage_estimate_bps=0.0,
+                )
+                candidates.append(candidate)
+                self._emit_confluence({
+                    "symbol": symbol,
+                    "confluence_score": candidate.confluence_score,
+                    "order_book_imbalance": candidate.order_book_imbalance,
+                    "asset_type": asset_type,
+                })
+            except BrokerError as exc:
+                self._log(f"NexoSignal AlphaCore skipped {symbol}: broker data error {exc}", "warning", "alphacore_skip", symbol)
+            except Exception as exc:
+                self._log(f"NexoSignal AlphaCore skipped {symbol}: {exc}", "error", "alphacore_error", symbol)
+
+        top = sorted(candidates, key=lambda c: c.confluence_score, reverse=True)[:3]
+        if len(top) < 3:
+            self._log(
+                f"NexoSignal AlphaCore found only {len(top)} eligible picks above threshold",
+                "warning",
+                "alphacore_top3_shortfall",
+                payload={"eligible": len(top), "threshold": config.SIGNAL_MIN_CONFIDENCE},
+            )
+        return top
+
+    def _run_market_open_pipeline(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._market_open_pipeline())
+
+        result: dict[str, object] = {}
+
+        def _runner() -> None:
+            try:
+                result["picks"] = asyncio.run(self._market_open_pipeline())
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+        if "error" in result:
+            raise result["error"]  # type: ignore[misc]
+        return result.get("picks", [])
 
     def _emit_confluence(self, payload: dict) -> None:
         msg = (
@@ -247,21 +374,115 @@ class NexoSignalAgent:
         )
         self._log(msg, event_type="confluence_update", symbol=payload["symbol"], payload=payload)
         emit_agent_event("confluence_update", payload)
+        self._record_telemetry(
+            stage="alphacore_confluence",
+            symbol=payload["symbol"],
+            slippage_bps=payload.get("spread_bps"),
+            payload=payload,
+        )
 
-    def execute_alpha_pick(self, pick) -> None:
+    def execute_alpha_pick(self, pick, allocation_weight: float | None = None) -> None:
         """NexoSignal Executor bracket-order flow."""
+        started = time.perf_counter()
+        asset_type = asset_type_for_symbol(pick.symbol)
         if self.circuit_breaker_active:
             self._log(f"NexoSignal Guard blocked {pick.symbol}: circuit breaker active", "warning", "execution_blocked", pick.symbol)
             return
+        if asset_type == "crypto":
+            self._log(
+                f"NexoSignal Guard blocked {pick.symbol}: crypto bracket execution is not enabled in the safe initial rollout",
+                "warning",
+                "execution_blocked",
+                pick.symbol,
+                {"asset_type": asset_type},
+            )
+            return
         account = self.broker.get_account()
         settled_cash = float(account.get("cash", 0))
-        qty = math.floor((settled_cash * config.POSITION_SIZE_PCT) / max(pick.price, 0.01))
+        portfolio_value = float(account.get("portfolio_value", 0) or 0)
+        target_weight = allocation_weight if allocation_weight is not None else config.POSITION_SIZE_PCT
+        capital_allocated = min(settled_cash * config.POSITION_SIZE_PCT, portfolio_value * target_weight)
+        qty = math.floor(capital_allocated / max(pick.price, 0.01))
+        active_symbols = [str(p.get("symbol", "")).upper() for p in self.broker.get_positions()]
+        try:
+            check_correlation(pick.symbol, active_symbols)
+        except RejectedOrder as exc:
+            original_qty = qty
+            qty = math.floor(qty * 0.5)
+            capital_allocated = qty * pick.price
+            self._log(
+                f"NexoSignal Guard scaled {pick.symbol} 50% for correlation: {exc}",
+                "warning",
+                "correlation_scaled",
+                pick.symbol,
+                {"original_qty": original_qty, "scaled_qty": qty, "reason": str(exc)},
+            )
         if qty <= 0:
             self._log(f"NexoSignal Guard blocked {pick.symbol}: insufficient settled cash", "warning", "execution_blocked", pick.symbol)
             return
         stop_loss = pick.price - pick.atr
         take_profit = pick.price + (5 * pick.atr)
         rr = ((take_profit - pick.price) / max(pick.price - stop_loss, 0.0001)) if stop_loss < pick.price else 0
+        var_1d, var_1d_pct = calculate_position_risk(pick.price, qty, pick.atr)
+        try:
+            proposed_positions = [{"var_1d": var_1d}]
+            check_portfolio_var(proposed_positions, portfolio_value)
+            record_risk_metrics(
+                symbol=pick.symbol,
+                var_1d=var_1d,
+                var_1d_pct=var_1d_pct,
+                portfolio_var=var_1d / max(portfolio_value, 0.0001),
+                correlation_flag=False,
+            )
+        except RejectedOrder as exc:
+            self._log(f"NexoSignal Guard blocked {pick.symbol}: {exc}", "warning", "execution_blocked", pick.symbol)
+            return
+
+        if self.dry_run:
+            self.session_trade_attempts += 1
+            record_signal_event(
+                symbol=pick.symbol,
+                strategy="NexoSignal AlphaCore",
+                base_signal="buy",
+                final_signal="buy",
+                confidence=pick.confluence_score,
+                approved=True,
+                reason=f"DRY RUN AlphaCore probability={pick.probability:.2f}",
+                price=pick.price,
+                indicators=asdict(pick) if hasattr(pick, "__dataclass_fields__") else dict(pick),
+                confluence_score=pick.confluence_score,
+                order_book_imbalance=pick.order_book_imbalance,
+            )
+            record_trade_event(
+                source="bot",
+                symbol=pick.symbol,
+                side="buy",
+                qty=qty,
+                order_type="bracket",
+                status="dry_run",
+                price=pick.price,
+                strategy="NexoSignal AlphaCore",
+                dry_run=True,
+                raw={"asset_type": asset_type, "capital_allocated": capital_allocated, "allocation_weight": target_weight},
+                target_stop_loss=stop_loss,
+                target_take_profit=take_profit,
+                current_risk_reward_ratio=rr,
+                execution_mode="autonomous_agent",
+            )
+            self._log(
+                f"[DRY RUN] NexoSignal Executor would submit bracket order for {pick.symbol}",
+                event_type="dry_run_order",
+                symbol=pick.symbol,
+                payload={"qty": qty, "capital_allocated": capital_allocated, "stop_loss": stop_loss, "take_profit": take_profit},
+            )
+            self._record_telemetry(
+                stage="dry_run_order",
+                symbol=pick.symbol,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                slippage_bps=getattr(pick, "slippage_estimate_bps", None),
+                payload={"qty": qty, "capital_allocated": capital_allocated, "confluence_score": pick.confluence_score},
+            )
+            return
         try:
             order = self.broker.place_bracket_order(pick.symbol, qty, pick.price, stop_loss, take_profit)
             self.session_trade_attempts += 1
@@ -305,15 +526,68 @@ class NexoSignalAgent:
                 execution_mode="autonomous_agent",
             )
             self._log(f"NexoSignal Executor submitted bracket order for {pick.symbol}", event_type="order_submitted", symbol=pick.symbol, payload={"qty": qty, "stop_loss": stop_loss, "take_profit": take_profit})
-            self.notifier.trade_opened(pick.symbol, pick.price, qty, stop_loss, take_profit)
+            self._record_telemetry(
+                stage="order_submitted",
+                symbol=pick.symbol,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                slippage_bps=getattr(pick, "slippage_estimate_bps", None),
+                payload={
+                    "qty": qty,
+                    "capital_allocated": capital_allocated,
+                    "asset_type": asset_type,
+                    "probability": pick.probability,
+                    "confluence_score": pick.confluence_score,
+                    "liquidity_score": getattr(pick, "liquidity_score", None),
+                },
+            )
+            self._send_trade_alert_async(
+                symbol=pick.symbol,
+                asset_type=asset_type,
+                qty=qty,
+                capital_allocated=capital_allocated,
+                confluence_score=pick.confluence_score,
+                entry=pick.price,
+                stop=stop_loss,
+                target=take_profit,
+            )
         except (BrokerError, RejectedOrder) as exc:
             self._log(f"NexoSignal Executor failed {pick.symbol}: {exc}", "error", "order_error", pick.symbol)
+
+    def _send_trade_alert_async(
+        self,
+        *,
+        symbol: str,
+        asset_type: str,
+        qty: float,
+        capital_allocated: float,
+        confluence_score: float,
+        entry: float,
+        stop: float,
+        target: float,
+    ) -> None:
+        def _send() -> None:
+            try:
+                self.notifier.trade_opened_detailed(
+                    symbol=symbol,
+                    asset_type=asset_type,
+                    qty=qty,
+                    capital_allocated=capital_allocated,
+                    confluence_score=confluence_score,
+                    entry=entry,
+                    stop=stop,
+                    target=target,
+                )
+            except Exception:
+                logger.exception("NexoSignal Telegram alert failed")
+
+        threading.Thread(target=_send, daemon=True).start()
 
     def heartbeat(self) -> None:
         """60-second NexoSignal Agent heartbeat."""
         self._log("NexoSignal Agent heartbeat fired", event_type="schedule_job")
         self.check_trade_floor()
         self.check_positions()
+        self._record_session_telemetry("heartbeat")
 
     def check_trade_floor(self) -> None:
         now_et = datetime.now(pytz.timezone("America/New_York")).time()
@@ -367,6 +641,7 @@ class NexoSignalAgent:
     def end_of_day_report(self) -> None:
         summary = trade_summary()
         self._log("NexoSignal Agent end-of-day report fired", event_type="schedule_job", payload=summary)
+        self._record_session_telemetry("end_of_day")
         self.notifier.eod_report(
             trades=int(summary.get("total") or 0),
             wins=int(summary.get("accepted") or 0),
@@ -375,6 +650,164 @@ class NexoSignalAgent:
             breaker_active=self.circuit_breaker_active,
             strikes=self.strike_count,
         )
+
+    def _record_session_telemetry(self, stage: str) -> None:
+        try:
+            summary = trade_summary()
+            total = int(summary.get("total") or 0)
+            accepted = int(summary.get("accepted") or 0)
+            failed = int(summary.get("failed") or 0)
+            win_rate = (accepted / total * 100) if total else 0.0
+            realized_pnl = -float(failed)
+            mtm_pnl = sum(float(p.get("unrealized_pl", 0)) for p in self.broker.get_positions())
+            self._record_telemetry(
+                stage=stage,
+                mark_to_market_pnl=round(mtm_pnl, 2),
+                realized_pnl=round(realized_pnl, 2),
+                win_rate=round(win_rate, 2),
+                trade_count=total,
+                payload={"accepted": accepted, "failed": failed, "dry_run": self.dry_run},
+            )
+        except Exception:
+            logger.exception("NexoSignal telemetry snapshot failed")
+
+    def _record_telemetry(
+        self,
+        *,
+        stage: str,
+        symbol: str | None = None,
+        latency_ms: float | None = None,
+        slippage_bps: float | None = None,
+        mark_to_market_pnl: float | None = None,
+        realized_pnl: float | None = None,
+        win_rate: float | None = None,
+        trade_count: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        try:
+            record_performance_event(
+                stage=stage,
+                symbol=symbol,
+                latency_ms=round(latency_ms, 2) if latency_ms is not None else None,
+                slippage_bps=round(slippage_bps, 2) if slippage_bps is not None else None,
+                mark_to_market_pnl=mark_to_market_pnl,
+                realized_pnl=realized_pnl,
+                win_rate=win_rate,
+                trade_count=trade_count,
+                uptime_seconds=int(time.time() - self.started_at),
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("NexoSignal Ledger telemetry write failed")
+
+    # ── Phase 2: Intelligence Extension scheduled jobs ─────────────────────
+
+    def scout_rebuild(self) -> None:
+        """Saturday 8 AM — NexoSignal Scout rebuilds the watchlist from FMP."""
+        self._log("NexoSignal Scout watchlist rebuild started", event_type="schedule_job")
+        entries = rebuild_watchlist(config.FMP_API_KEY, config.WATCHLIST_SIZE)
+        if not entries:
+            self._log("NexoSignal Scout: no entries returned (FMP_API_KEY may be unset)", "warning")
+            return
+        for entry in entries:
+            try:
+                upsert_watchlist_entry(
+                    symbol=entry["symbol"],
+                    composite_score=entry["composite_score"],
+                    category=entry["category"],
+                    rank_position=entry["rank_position"],
+                    score_growth=entry.get("score_growth", 0.0),
+                    score_value=entry.get("score_value", 0.0),
+                    score_yield=entry.get("score_yield", 0.0),
+                    score_sentiment=entry.get("score_sentiment", 0.0),
+                    score_insider=entry.get("score_insider", 50.0),
+                    score_earnings_quality=entry.get("score_earnings_quality", 0.0),
+                )
+            except Exception:
+                logger.exception("Scout: failed to persist watchlist entry for %s", entry.get("symbol"))
+        self._log(
+            f"NexoSignal Scout watchlist rebuilt: {len(entries)} symbols",
+            event_type="watchlist_rebuilt",
+            payload={"count": len(entries)},
+        )
+        emit_agent_event("watchlist_rebuilt", {"count": len(entries), "top3": [e["symbol"] for e in entries[:3]]})
+
+    def macro_refresh(self) -> None:
+        """Sunday 8 AM — NexoSignal Lens fetches macro regime from FRED."""
+        self._log("NexoSignal Lens macro refresh started", event_type="schedule_job")
+        result = detect_market_regime(config.FRED_API_KEY)
+        try:
+            record_macro_snapshot(
+                dgs10=result.get("dgs10"),
+                dgs2=result.get("dgs2"),
+                spread=result.get("spread"),
+                jobless_claims=result.get("jobless_claims"),
+                regime=result["regime"],
+            )
+        except Exception:
+            logger.exception("Lens: failed to persist macro snapshot")
+        self._log(
+            f"NexoSignal Lens macro regime: {result['regime'].upper()}",
+            event_type="macro_refreshed",
+            payload=result,
+        )
+        emit_agent_event("macro_refreshed", result)
+
+    def premarket_briefing(self) -> None:
+        """Weekday 7 AM — sends pre-market Telegram intelligence briefing."""
+        self._log("NexoSignal pre-market briefing job fired", event_type="schedule_job")
+        regime = detect_market_regime(config.FRED_API_KEY)
+        watchlist = list_watchlist(10)
+        insiders = list_insider_activity(5)
+
+        self._log(
+            f"NexoSignal pre-market: regime={regime['regime']} watchlist={len(watchlist)} insiders={len(insiders)}",
+            event_type="premarket_briefing",
+        )
+        self.notifier.send_premarket_briefing(
+            picks=[],
+            regime=regime,
+            macro=None,
+            insiders=insiders,
+        )
+
+    def insider_parse(self) -> None:
+        """Weekday 6 PM — NexoSignal Lens parses SEC EDGAR Form 4 filings."""
+        from .ai_research import parse_insider_filings
+
+        self._log("NexoSignal Lens insider parse job fired", event_type="schedule_job")
+        watchlist = list_watchlist(config.WATCHLIST_SIZE)
+        if not watchlist:
+            self._log("Lens: watchlist empty — run Scout first (Sat 8 AM)", "warning")
+            return
+
+        total_saved = 0
+        for entry in watchlist[:20]:
+            sym = entry.get("symbol", "")
+            if not sym:
+                continue
+            filings = parse_insider_filings(sym, max_filings=5)
+            for filing in filings:
+                try:
+                    record_insider_activity(
+                        symbol=sym,
+                        insider_name=filing.get("insider_name"),
+                        title=filing.get("title"),
+                        transaction_type=filing.get("transaction_type"),
+                        shares=filing.get("shares"),
+                        value=filing.get("value"),
+                        filed_at=filing.get("filed_at", datetime.utcnow().isoformat()),
+                    )
+                    total_saved += 1
+                except Exception:
+                    logger.exception("Lens: failed to persist insider filing for %s", sym)
+
+        self._log(
+            f"NexoSignal Lens insider parse complete: {total_saved} filings saved",
+            event_type="insider_parsed",
+            payload={"total_saved": total_saved},
+        )
+        emit_agent_event("insider_parsed", {"total_saved": total_saved})
 
     def run_once(self) -> None:
         """Single scan across all watched symbols."""
@@ -459,11 +892,20 @@ def start_nexosignal_scheduler(agent: NexoSignalAgent):
         raise RuntimeError("APScheduler is not installed. Install requirements.txt before starting the scheduler.")
     eastern = pytz.timezone("America/New_York")
     scheduler = BackgroundScheduler(timezone=eastern)
+
+    # ── Existing jobs ──────────────────────────────────────────────────────
     scheduler.add_job(agent.run_market_open_scan, "cron", day_of_week="mon-fri", hour=9, minute=30, id="nexosignal_market_open")
     scheduler.add_job(agent.heartbeat, "interval", seconds=60, id="nexosignal_heartbeat")
     scheduler.add_job(agent.end_of_day_report, "cron", day_of_week="mon-fri", hour=16, minute=0, id="nexosignal_eod")
+
+    # ── Phase 2: Intelligence Extension jobs ──────────────────────────────
+    scheduler.add_job(agent.scout_rebuild, "cron", day_of_week="sat", hour=8, minute=0, id="nexosignal_scout_rebuild")
+    scheduler.add_job(agent.macro_refresh, "cron", day_of_week="sun", hour=8, minute=0, id="nexosignal_macro_refresh")
+    scheduler.add_job(agent.premarket_briefing, "cron", day_of_week="mon-fri", hour=7, minute=0, id="nexosignal_premarket")
+    scheduler.add_job(agent.insider_parse, "cron", day_of_week="mon-fri", hour=18, minute=0, id="nexosignal_insider_parse")
+
     scheduler.start()
-    agent._log("NexoSignal Agent scheduler started", event_type="scheduler_started")
+    agent._log("NexoSignal Agent scheduler started (Phase 2: Scout + Lens + Guard)", event_type="scheduler_started")
     return scheduler
 
 

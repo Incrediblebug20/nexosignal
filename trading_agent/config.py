@@ -1,3 +1,4 @@
+import json as _json
 import os
 from dotenv import load_dotenv
 
@@ -32,6 +33,19 @@ DASHBOARD_BRAND_NAME = os.getenv("DASHBOARD_BRAND_NAME", "NexoSignal")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "change-me")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "change-this-secret-key")
+
+# Multi-user support: DASHBOARD_USERS overrides the single-user vars above.
+# Format: JSON object of { "username": "password_or_hash", ... }
+# Example: DASHBOARD_USERS={"admin":"secret123","trader":"pass456"}
+# Falls back to DASHBOARD_USERNAME / DASHBOARD_PASSWORD if not set.
+_users_raw = os.getenv("DASHBOARD_USERS", "")
+if _users_raw:
+    try:
+        DASHBOARD_USERS: dict[str, str] = _json.loads(_users_raw)
+    except Exception:
+        DASHBOARD_USERS = {DASHBOARD_USERNAME: DASHBOARD_PASSWORD}
+else:
+    DASHBOARD_USERS = {DASHBOARD_USERNAME: DASHBOARD_PASSWORD}
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "")
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
@@ -56,6 +70,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 AI_RESEARCH_ENABLED = os.getenv("AI_RESEARCH_ENABLED", "false").lower() in {"true", "1", "yes"}
 # Minimum risk:reward ratio Claude must confirm before approving a trade
 AI_MIN_RISK_REWARD_RATIO = float(os.getenv("AI_MIN_RISK_REWARD_RATIO", "5.0"))
+# Master Decision consensus floor. Lower for research, higher for live automation.
+MASTER_CONSENSUS_MIN_CONFIDENCE = float(os.getenv("MASTER_CONSENSUS_MIN_CONFIDENCE", "70"))
+# Optional local Ollama/Mistral analyst. Disabled by default.
+LOCAL_LLM_ENABLED = os.getenv("LOCAL_LLM_ENABLED", "false").lower() in {"true", "1", "yes"}
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
 
 # NexoSignal mobile alerts
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -63,3 +83,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # NexoSignal AlphaCore model/cache
 ALPHACORE_MODEL_PATH = os.getenv("ALPHACORE_MODEL_PATH", "alphacore_model.pkl")
+
+# NexoSignal Phase 2 — Intelligence Extension
+FMP_API_KEY       = os.getenv("FMP_API_KEY", "")         # Financial Modeling Prep (free: 250 calls/day)
+NEWS_API_KEY      = os.getenv("NEWS_API_KEY", "")         # NewsAPI.org (free tier)
+FRED_API_KEY      = os.getenv("FRED_API_KEY", "")         # FRED (St. Louis Fed, free)
+MAX_PORTFOLIO_VAR = float(os.getenv("MAX_PORTFOLIO_VAR", "0.02"))   # 2 % daily portfolio VaR hard limit
+WATCHLIST_SIZE    = int(os.getenv("WATCHLIST_SIZE", "30"))           # Scout: symbols to maintain
+FINBERT_MODEL_PATH = os.getenv("FINBERT_MODEL_PATH", "ProsusAI/finbert")  # HuggingFace FinBERT

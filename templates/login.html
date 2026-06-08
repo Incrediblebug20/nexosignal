@@ -1,30 +1,77 @@
 {% extends "base.html" %}
 
-{% block title %}Login - {{ config.DASHBOARD_BRAND_NAME }}{% endblock %}
+{% block title %}Sign In · {{ config.DASHBOARD_BRAND_NAME }}{% endblock %}
+
+{% block flash %}{% endblock %}
 
 {% block content %}
+<div class="login-bg" aria-hidden="true">
+  <div class="login-orb orb1"></div>
+  <div class="login-orb orb2"></div>
+  <div class="login-orb orb3"></div>
+</div>
+
 <section class="login-shell">
-  <form class="login-panel" method="post">
-    <div class="login-brand">
-      <span class="brand-mark large">NS</span>
-      <div>
-        <h1>{{ config.DASHBOARD_BRAND_NAME }}</h1>
-        <p>Secure NexoSignal operations console</p>
+  <div class="login-card">
+
+    <div class="login-header">
+      <div class="login-logo">
+        <span class="brand-mark login-mark">NS</span>
       </div>
+      <h1>{{ config.DASHBOARD_BRAND_NAME }}</h1>
     </div>
-    <label>
-      Username
-      <input name="username" autocomplete="username" required>
-    </label>
-    <label>
-      Password
-      <input name="password" type="password" autocomplete="current-password" required>
-    </label>
-    <button type="submit">Login</button>
-    <div class="login-meta">
-      <span>{{ config.TRADING_MODE|upper }}</span>
-      <span>{{ config.DATABASE_LABEL }} storage</span>
-    </div>
-  </form>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="login-alert login-alert--{{ category }}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            {{ message }}
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <form class="login-form" method="post" autocomplete="on" novalidate>
+      <div class="field-group">
+        <label for="login-username">Username</label>
+        <div class="field-wrap">
+          <svg class="field-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <input id="login-username" name="username" type="text" autocomplete="username" placeholder="Enter your username" required>
+        </div>
+      </div>
+      <div class="field-group">
+        <label for="login-password">Password</label>
+        <div class="field-wrap">
+          <svg class="field-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required>
+          <button type="button" class="eye-toggle" id="eye-btn" aria-label="Show/hide password">
+            <svg id="eye-show" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg id="eye-hide" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+      </div>
+      <button type="submit" class="login-btn">
+        Sign in
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </button>
+    </form>
+
+  </div>
 </section>
+
+<script>
+  (function () {
+    const btn = document.getElementById("eye-btn");
+    const inp = document.getElementById("login-password");
+    const show = document.getElementById("eye-show");
+    const hide = document.getElementById("eye-hide");
+    btn.addEventListener("click", function () {
+      const isHidden = inp.type === "password";
+      inp.type = isHidden ? "text" : "password";
+      show.style.display = isHidden ? "none" : "";
+      hide.style.display = isHidden ? "" : "none";
+    });
+  })();
+</script>
 {% endblock %}

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from . import config
 from .restrictions import assert_no_transfer, check_order, get_tracker, RejectedOrder
+from .strategy import is_supported_crypto, normalize_symbol
 
 
 class BrokerError(Exception):
@@ -147,7 +148,9 @@ class AlpacaBroker:
         time_in_force: str = "day",
     ) -> dict:
         """NexoSignal Executor bracket order using settled cash only."""
-        symbol = symbol.upper()
+        symbol = normalize_symbol(symbol)
+        if is_supported_crypto(symbol):
+            raise RejectedOrder("Crypto bracket orders are not enabled in the safe initial rollout.")
         account = self.get_account()
         portfolio = float(account["portfolio_value"])
         cash = float(account["cash"])
@@ -199,6 +202,15 @@ class AlpacaBroker:
     # ------------------------------------------------------------------ #
 
     def get_last_price(self, symbol: str) -> float:
+        symbol = normalize_symbol(symbol)
+        if is_supported_crypto(symbol):
+            data = self._get(
+                "/v1beta3/crypto/us/latest/trades",
+                params={"symbols": symbol},
+                base=self._data_base,
+            )
+            trade = (data.get("trades") or {}).get(symbol) or data.get("trade") or {}
+            return float(trade["p"])
         data = self._get(
             f"/v2/stocks/{symbol.upper()}/trades/latest",
             base=self._data_base,
@@ -207,6 +219,17 @@ class AlpacaBroker:
 
     def get_bars(self, symbol: str, timeframe: str = "1Min", limit: int = 60) -> list[dict]:
         """Return recent OHLCV bars."""
+        symbol = normalize_symbol(symbol)
+        if is_supported_crypto(symbol):
+            data = self._get(
+                "/v1beta3/crypto/us/bars",
+                params={"symbols": symbol, "timeframe": timeframe, "limit": limit},
+                base=self._data_base,
+            )
+            bars = data.get("bars", {})
+            if isinstance(bars, dict):
+                return bars.get(symbol, [])
+            return bars if isinstance(bars, list) else []
         data = self._get(
             f"/v2/stocks/{symbol.upper()}/bars",
             params={"timeframe": timeframe, "limit": limit, "feed": "iex"},
@@ -300,6 +323,30 @@ class TelegramNotifier:
             "Mode: Autonomous"
         )
 
+    def trade_opened_detailed(
+        self,
+        *,
+        symbol: str,
+        asset_type: str,
+        qty: float,
+        capital_allocated: float,
+        confluence_score: float,
+        entry: float,
+        stop: float,
+        target: float,
+    ) -> None:
+        self.send(
+            "NexoSignal Executor\n"
+            "Status: Autonomous Bracket Order Placed\n"
+            f"Asset: {symbol} ({asset_type.upper()})\n"
+            f"Capital: ${capital_allocated:,.2f}\n"
+            f"Quantity: {qty}\n"
+            f"AlphaCore: {confluence_score:.2f}/100\n"
+            f"Entry: ${entry:.2f}\n"
+            f"Take Profit: ${target:.2f}\n"
+            f"Stop Loss: ${stop:.2f}"
+        )
+
     def stop_adjusted(self, symbol: str, entry: float, current: float, atr_multiple: float) -> None:
         self.send(
             f"Stop Adjusted - {symbol}\n"
@@ -328,3 +375,42 @@ class TelegramNotifier:
 
     def circuit_breaker_tripped(self, reason: str) -> None:
         self.send(f"NexoSignal circuit breaker tripped.\nReason: {reason}")
+
+    def send_premarket_briefing(
+        self,
+        picks: list,
+        regime: dict,
+        macro: dict | None,
+        insiders: list[dict],
+    ) -> None:
+        """7 AM pre-market intelligence briefing sent to Telegram."""
+        today = datetime.now().strftime("%Y-%m-%d %H:%M ET")
+        lines = [f"NexoSignal Pre-Market Briefing — {today}"]
+
+        reg = regime.get("regime", "neutral").upper()
+        spread = regime.get("spread")
+        claims = regime.get("jobless_claims")
+        lines.append(
+            f"Macro Regime: {reg}"
+            + (f" | Yield spread: {spread:+.3f}%" if spread is not None else "")
+            + (f" | Jobless claims: {claims:,.0f}" if claims is not None else "")
+        )
+
+        if picks:
+            lines.append(f"\nTop AlphaCore picks ({len(picks)}):")
+            for i, p in enumerate(picks[:5], start=1):
+                lines.append(f"  {i}. {p.symbol} | Score {p.confluence_score:.0f} | ~${p.price:.2f}")
+
+        if insiders:
+            lines.append(f"\nRecent insider filings ({len(insiders)}):")
+            for ins in insiders[:3]:
+                tx = ins.get("transaction_type", "?")
+                name = ins.get("insider_name", "Unknown")
+                sym = ins.get("symbol", "")
+                shares = ins.get("shares")
+                lines.append(
+                    f"  {sym} — {name}: {tx}"
+                    + (f" {shares:,.0f} shares" if shares else "")
+                )
+
+        self.send("\n".join(lines))
