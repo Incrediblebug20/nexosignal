@@ -1,17 +1,15 @@
 """
-Multi-agent AI research layer.
+Multi-agent AI research — master/slave orchestration.
 
-Three specialized agents analyze market conditions in parallel:
+Slave agents provide specialised analysis:
+  Gemini       — Google Generative AI: fundamental + technical market research
+  Grok         — xAI: real-time news sentiment and short-term prediction
+  Claude       — Anthropic: trade execution with strict 5:1 risk-reward enforcement
 
-  Gemini  — Google Generative AI: fundamental + technical market research
-             for stocks, crypto, ETFs, Bitcoin, and other assets.
-
-  Grok    — xAI (via OpenAI-compatible API): real-time news sentiment
-             and short-term price prediction charts.
-
-  Claude  — Anthropic: final trade execution decision using signal
-             intelligence engine, enforcing a strict 5:1 risk-reward
-             ratio. Only approves trades where reward/risk >= 5.0.
+Local LLM Master (Ollama) synthesises all slave reports → final verdict:
+  Local Master — Runs locally via Ollama/Mistral; receives Gemini+Grok+Claude
+                 outputs and issues the authoritative NexoSignal decision.
+                 Falls back to a Python weighted consensus when disabled.
 
 Usage:
     from trading_agent.ai_research import run_multi_agent_research
@@ -48,6 +46,13 @@ _SYSTEM_CLAUDE = (
     "You are Claude, the trade execution AI for a professional algorithmic trading system. "
     "Your only job is to validate trade setups and enforce a strict 5:1 risk-reward rule. "
     "RULE: Never approve a trade where reward/risk < 5.0. "
+    "You respond ONLY with valid JSON — no prose, no markdown fences."
+)
+
+_SYSTEM_LOCAL_MASTER = (
+    "You are NexoSignal Master, a local AI orchestrator overseeing three specialised trading agents. "
+    "Your role is to synthesise their research and issue the authoritative final trade verdict. "
+    "You enforce strict risk rules and require agent consensus before approving any trade. "
     "You respond ONLY with valid JSON — no prose, no markdown fences."
 )
 
@@ -95,6 +100,7 @@ class MultiAgentResearch:
     take_profit: Optional[float] = None
     risk_reward_ratio: Optional[float] = None
     master_decision: Optional[MasterDecision] = None
+    local_master: Optional[AIResearchSignal] = None  # Local LLM master synthesiser
 
 
 def _parse_json_response(text: str) -> dict:
@@ -278,54 +284,130 @@ def _grok_research(symbol: str, price: float, bars: list[dict]) -> AIResearchSig
 #  Claude: trade execution with 5:1 risk-reward validation
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _ollama_research(symbol: str, price: float, bars: list[dict]) -> AIResearchSignal:
-    """Optional local Mistral/Ollama analyst for no-cloud dry-run research."""
+# ──────────────────────────────────────────────────────────────────────────────
+#  Local LLM Master: synthesises all slave agents → final verdict
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _local_master_orchestrate(
+    symbol: str,
+    price: float,
+    gemini: Optional[AIResearchSignal],
+    grok: Optional[AIResearchSignal],
+    claude: Optional[AIResearchSignal],
+    base_signal: Signal,
+    base_confidence: float,
+    indicators: dict,
+    atr: float,
+) -> AIResearchSignal:
+    """
+    Local LLM Master — receives all slave agent outputs and produces the final
+    NexoSignal trade verdict. Runs entirely locally via Ollama (no cloud API).
+
+    The master MUST respect Claude's 5:1 ratio rule: if Claude did not approve
+    the setup, the master cannot override to buy/sell (enforced in Python too).
+    """
     if not config.LOCAL_LLM_ENABLED:
         return AIResearchSignal(
-            provider="ollama",
+            provider="local_master",
             symbol=symbol,
             signal="hold",
             confidence=0,
-            rationale="Local LLM disabled (set LOCAL_LLM_ENABLED=true to use Ollama).",
+            rationale="Local Master LLM disabled. Set LOCAL_LLM_ENABLED=true and run Ollama to activate.",
             error="disabled",
         )
 
-    closes = [float(b["c"]) for b in bars[-20:]]
-    pct_chg = ((closes[-1] - closes[0]) / closes[0] * 100) if len(closes) >= 2 else 0.0
+    def _fmt_agent(sig: Optional[AIResearchSignal], name: str) -> str:
+        if not sig:
+            return f"{name}: NO DATA"
+        if sig.error:
+            return f"{name}: UNAVAILABLE (reason={sig.error})"
+        parts = [
+            f"{name}:",
+            f"  Signal={sig.signal.upper()} | Confidence={sig.confidence:.0f}/100 | Sentiment={sig.sentiment}",
+        ]
+        if sig.price_target is not None:
+            parts.append(f"  PriceTarget=${sig.price_target:.4f}")
+        if sig.stop_loss is not None:
+            parts.append(f"  StopLoss=${sig.stop_loss:.4f}")
+        if sig.risk_reward_ratio is not None:
+            parts.append(f"  RR={sig.risk_reward_ratio:.2f}:1")
+        if getattr(sig, "news_catalyst", ""):
+            parts.append(f"  News={sig.news_catalyst[:100]}")
+        parts.append(f"  Rationale={sig.rationale[:180]}")
+        return "\n".join(parts)
+
+    claude_approved = bool(
+        claude and not claude.error
+        and claude.signal != "hold"
+        and claude.risk_reward_ratio is not None
+        and claude.risk_reward_ratio >= config.AI_MIN_RISK_REWARD_RATIO
+    )
+
     prompt = (
-        f"Analyze {symbol} for an intraday trade. Current price={price:.4f}. "
-        f"20-bar change={pct_chg:+.2f}%. Recent closes={closes[-8:]}. "
-        "Return only JSON with: signal, confidence, sentiment, rationale."
+        f"You are NexoSignal Master — a local AI trading orchestrator.\n"
+        f"Review the three slave agent reports and issue the FINAL trade verdict.\n\n"
+        f"Symbol: {symbol} | Price: ${price:.4f} | ATR(14): {atr:.4f}\n"
+        f"Technical base: {base_signal.upper()} (confidence {base_confidence:.0f}/100)\n"
+        f"RSI: {indicators.get('rsi', 'N/A')} | Trend: {indicators.get('trend', 'N/A')} "
+        f"| VolRatio: {indicators.get('volume_ratio', 'N/A')}\n\n"
+        f"=== SLAVE AGENT REPORTS ===\n\n"
+        f"{_fmt_agent(gemini, 'GEMINI (Market Research)')}\n\n"
+        f"{_fmt_agent(grok, 'GROK (News Intelligence)')}\n\n"
+        f"{_fmt_agent(claude, 'CLAUDE (Risk-Reward Validator)')}\n"
+        f"  Claude 5:1 APPROVED: {'YES' if claude_approved else 'NO — you must set signal=hold'}\n\n"
+        f"=== MASTER RULES ===\n"
+        f"Rule 1: If Claude 5:1 APPROVED is NO, set signal=hold and approved=false.\n"
+        f"Rule 2: If Gemini and Grok strongly disagree (buy vs sell), set signal=hold.\n"
+        f"Rule 3: Your confidence reflects the strength of agent agreement.\n\n"
+        f'Return ONLY valid JSON: {{"signal":"buy"|"sell"|"hold","confidence":0-100,'
+        f'"approved":true|false,"agent_agreement":"full"|"partial"|"none",'
+        f'"rationale":"2-3 sentence master summary"}}'
     )
 
     try:
         resp = requests.post(
             f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
-            json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=20,
+            json={
+                "model": config.OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.1, "num_predict": 350},
+            },
+            timeout=45,
         )
         if not resp.ok:
             raise RuntimeError(f"Ollama HTTP {resp.status_code}")
         text = str(resp.json().get("response", "{}"))
         data = _parse_json_response(text)
+
+        signal = _safe_signal(data.get("signal", "hold"))
+        # Python safety net: master cannot override Claude's 5:1 rejection
+        if not claude_approved:
+            signal = "hold"
+
         return AIResearchSignal(
-            provider="ollama",
+            provider="local_master",
             symbol=symbol,
-            signal=_safe_signal(data.get("signal", "hold")),
+            signal=signal,
             confidence=float(data.get("confidence", 50)),
             rationale=str(data.get("rationale", "")),
-            sentiment=str(data.get("sentiment", "neutral")),
+            price_target=claude.price_target if claude else None,
+            stop_loss=claude.stop_loss if claude else None,
+            risk_reward_ratio=claude.risk_reward_ratio if claude else None,
+            sentiment=str(data.get("agent_agreement", "partial")),  # stores agreement level
             timeframe="intraday",
             raw_response=text,
         )
+
     except Exception as exc:
-        logger.warning("Ollama research failed for %s: %s", symbol, exc)
+        logger.warning("Local Master Orchestrator failed for %s: %s", symbol, exc)
         return AIResearchSignal(
-            provider="ollama",
+            provider="local_master",
             symbol=symbol,
             signal="hold",
             confidence=0,
-            rationale=f"Ollama error: {str(exc)[:120]}",
+            rationale=f"Local Master error (is Ollama running?): {str(exc)[:120]}",
             error=str(exc)[:200],
         )
 
@@ -447,21 +529,22 @@ def run_multi_agent_research(
     indicators: dict,
 ) -> MultiAgentResearch:
     """
-    Run Gemini and Grok concurrently, then pass their outputs to Claude
-    for a final 5:1 risk-reward validated trade decision.
+    Master/slave pipeline:
+      Step 1 — Slave agents Gemini + Grok run in parallel.
+      Step 2 — Claude slave validates the 5:1 risk-reward using their outputs.
+      Step 3 — Local LLM Master synthesises all three reports → final verdict.
 
-    All agents fail gracefully when their API key is missing or on error.
+    When LOCAL_LLM_ENABLED=false the master is skipped and a Python weighted
+    consensus acts as fallback. All agents degrade gracefully on missing keys.
     """
     atr = _compute_atr(bars)
     gemini_result: Optional[AIResearchSignal] = None
     grok_result: Optional[AIResearchSignal] = None
-    ollama_result: Optional[AIResearchSignal] = None
 
-    # Market, sentiment, and optional local LLM agents run in parallel.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    # ── Step 1: Slave agents — Gemini + Grok run in parallel ─────────────────
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         gem_f = pool.submit(_gemini_research, symbol, price, bars)
         grk_f = pool.submit(_grok_research, symbol, price, bars)
-        ollama_f = pool.submit(_ollama_research, symbol, price, bars)
         try:
             gemini_result = gem_f.result(timeout=20)
         except Exception as exc:
@@ -470,19 +553,23 @@ def run_multi_agent_research(
             grok_result = grk_f.result(timeout=20)
         except Exception as exc:
             logger.warning("Grok future error: %s", exc)
-        try:
-            ollama_result = ollama_f.result(timeout=20)
-        except Exception as exc:
-            logger.warning("Ollama future error: %s", exc)
 
-    # Claude runs after collecting the other agents' results
+    # ── Step 2: Claude slave — validates 5:1 using Gemini + Grok intelligence ─
     claude_result = _claude_execution_decision(
         symbol=symbol, price=price, base_signal=base_signal,
         base_confidence=base_confidence, gemini=gemini_result,
         grok=grok_result, indicators=indicators, atr=atr,
     )
 
-    # ── Weighted consensus ──────────────────────────────────────────────────
+    # ── Step 3: Local LLM Master — synthesises all slave reports ─────────────
+    local_master_result = _local_master_orchestrate(
+        symbol=symbol, price=price,
+        gemini=gemini_result, grok=grok_result, claude=claude_result,
+        base_signal=base_signal, base_confidence=base_confidence,
+        indicators=indicators, atr=atr,
+    )
+
+    # ── Weighted consensus (always computed — used for weights display + fallback) ──
     buy_w = sell_w = total_w = 0.0
 
     def _accum(sig: Optional[AIResearchSignal], weight_mul: float = 1.0) -> None:
@@ -498,9 +585,7 @@ def run_multi_agent_research(
 
     _accum(gemini_result, 1.0)
     _accum(grok_result, 1.0)
-    _accum(ollama_result, 0.75)
-    _accum(claude_result, 2.0)     # Claude gets 2× weight — it's the executor
-    # Base technical signal also votes
+    _accum(claude_result, 2.0)  # Claude gets 2× weight as the risk-reward executor
     if base_signal != "hold":
         w = base_confidence
         total_w += w
@@ -511,19 +596,33 @@ def run_multi_agent_research(
 
     if total_w > 0:
         if buy_w > sell_w and buy_w / total_w >= 0.50:
-            consensus: Signal = "buy"
-            consensus_conf = round(buy_w / total_w * 100, 1)
+            py_consensus: Signal = "buy"
+            py_conf = round(buy_w / total_w * 100, 1)
         elif sell_w > buy_w and sell_w / total_w >= 0.50:
-            consensus = "sell"
-            consensus_conf = round(sell_w / total_w * 100, 1)
+            py_consensus = "sell"
+            py_conf = round(sell_w / total_w * 100, 1)
         else:
-            consensus = "hold"
-            consensus_conf = round(max(buy_w, sell_w) / total_w * 100, 1)
+            py_consensus = "hold"
+            py_conf = round(max(buy_w, sell_w) / total_w * 100, 1)
     else:
-        consensus = "hold"
-        consensus_conf = 0.0
+        py_consensus = "hold"
+        py_conf = 0.0
 
-    # 5:1 approval comes exclusively from Claude
+    # ── Use Local Master signal if enabled and healthy ────────────────────────
+    use_local_master = (
+        config.LOCAL_LLM_ENABLED
+        and local_master_result is not None
+        and not local_master_result.error
+    )
+
+    if use_local_master:
+        consensus: Signal = local_master_result.signal
+        consensus_conf = local_master_result.confidence
+    else:
+        consensus = py_consensus
+        consensus_conf = py_conf
+
+    # ── 5:1 approval comes exclusively from Claude ────────────────────────────
     min_ratio = config.AI_MIN_RISK_REWARD_RATIO
     approved_5to1 = bool(
         claude_result
@@ -532,25 +631,38 @@ def run_multi_agent_research(
         and claude_result.risk_reward_ratio is not None
         and claude_result.risk_reward_ratio >= min_ratio
     )
+
     active_agents = [
-        sig for sig in (gemini_result, grok_result, ollama_result, claude_result)
+        sig for sig in (gemini_result, grok_result, claude_result)
         if sig and not sig.error and sig.signal != "hold"
     ]
     disagreement = len({sig.signal for sig in active_agents}) > 1
+
     approved_master = bool(
         approved_5to1
         and consensus != "hold"
         and consensus_conf >= config.MASTER_CONSENSUS_MIN_CONFIDENCE
         and not disagreement
     )
-    if disagreement:
-        rationale = "Agents disagree; NexoSignal Master Decision forced HOLD."
-    elif not approved_5to1:
-        rationale = "Executor did not approve the required risk/reward setup."
-    elif consensus_conf < config.MASTER_CONSENSUS_MIN_CONFIDENCE:
-        rationale = "Consensus confidence is below the master threshold."
+
+    if use_local_master:
+        lm_text = local_master_result.rationale[:200]
+        if not approved_5to1:
+            rationale = f"Claude rejected 5:1 ratio — Master LLM held. {lm_text}"
+        elif disagreement:
+            rationale = f"Agent disagreement detected — Master LLM held. {lm_text}"
+        else:
+            rationale = local_master_result.rationale
     else:
-        rationale = "Consensus and Executor approval aligned."
+        if disagreement:
+            rationale = "Agents disagree; NexoSignal Master Decision forced HOLD."
+        elif not approved_5to1:
+            rationale = "Executor did not approve the required risk/reward setup."
+        elif consensus_conf < config.MASTER_CONSENSUS_MIN_CONFIDENCE:
+            rationale = "Consensus confidence is below the master threshold."
+        else:
+            rationale = "Consensus and Executor approval aligned."
+
     master = MasterDecision(
         signal=consensus if approved_master else "hold",
         confidence=consensus_conf,
@@ -567,6 +679,7 @@ def run_multi_agent_research(
         gemini=gemini_result,
         grok=grok_result,
         claude=claude_result,
+        local_master=local_master_result,
         consensus_signal=consensus,
         consensus_confidence=consensus_conf,
         approved_5to1=approved_5to1,

@@ -1,0 +1,421 @@
+{% extends "base.html" %}
+{% block title %}Research{% endblock %}
+
+{% block content %}
+
+<!-- ════ Page header + search ══════════════════════════════════════════════ -->
+<div class="res-header">
+  <div>
+    <h1 class="pf-title">AI Research Console</h1>
+    <p class="pf-sub">Gemini + Grok (parallel) → Claude (5:1 validator) → Local LLM Master (final verdict)</p>
+  </div>
+  <div class="res-search-bar">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input id="ai-symbol-input" type="text" placeholder="Enter symbol: AAPL, BTC/USD, TSLA, SPY…" maxlength="20" value="{{ prefill_symbol or '' }}">
+    <button id="ai-run-btn" type="button" onclick="runAIResearch()">
+      Analyze
+    </button>
+  </div>
+</div>
+
+<!-- Agent badges -->
+<div class="res-agent-badges">
+  <span class="agent-badge gemini-badge">● Gemini</span>
+  <span class="res-arrow">→</span>
+  <span class="agent-badge grok-badge">● Grok</span>
+  <span class="res-arrow">→</span>
+  <span class="agent-badge claude-badge">● Claude 5:1</span>
+  <span class="res-arrow">→</span>
+  <span class="agent-badge master-badge">● Local Master</span>
+</div>
+
+<!-- Loading state -->
+<div id="ai-loading" class="ai-loading hidden">
+  <div class="spinner"></div>
+  <span>Running pipeline: Gemini + Grok in parallel → Claude validates 5:1 ratio → Local Master synthesises final verdict…</span>
+</div>
+
+<!-- ════ AI Agent Cards ══════════════════════════════════════════════════════ -->
+<div id="ai-agents-grid" class="ai-agents-grid">
+  <!-- Gemini -->
+  <div class="agent-card agent-card--gemini" id="card-gemini">
+    <div class="agent-card-header">
+      <div class="agent-icon gemini-icon">G</div>
+      <div>
+        <div class="agent-name">Gemini</div>
+        <div class="agent-role">Market Research · Stocks · Crypto · ETF</div>
+      </div>
+      <span class="signal-badge" id="gemini-signal-badge">—</span>
+    </div>
+    <div class="agent-body">
+      <div class="agent-metric-row">
+        <div class="agent-metric"><span>Confidence</span><strong id="gemini-conf">—</strong></div>
+        <div class="agent-metric"><span>Sentiment</span><strong id="gemini-sentiment">—</strong></div>
+        <div class="agent-metric"><span>Target</span><strong id="gemini-target">—</strong></div>
+        <div class="agent-metric"><span>Stop Loss</span><strong id="gemini-sl">—</strong></div>
+        <div class="agent-metric"><span>R:R Ratio</span><strong id="gemini-rr">—</strong></div>
+      </div>
+      <div class="agent-rationale" id="gemini-rationale">Enter a symbol and click Analyze to start research…</div>
+    </div>
+  </div>
+
+  <!-- Grok -->
+  <div class="agent-card agent-card--grok" id="card-grok">
+    <div class="agent-card-header">
+      <div class="agent-icon grok-icon">X</div>
+      <div>
+        <div class="agent-name">Grok (xAI)</div>
+        <div class="agent-role">News Intelligence · Prediction Charts</div>
+      </div>
+      <span class="signal-badge" id="grok-signal-badge">—</span>
+    </div>
+    <div class="agent-body">
+      <div class="agent-metric-row">
+        <div class="agent-metric"><span>Confidence</span><strong id="grok-conf">—</strong></div>
+        <div class="agent-metric"><span>Sentiment</span><strong id="grok-sentiment">—</strong></div>
+        <div class="agent-metric"><span>Target</span><strong id="grok-target">—</strong></div>
+        <div class="agent-metric"><span>Stop Loss</span><strong id="grok-sl">—</strong></div>
+        <div class="agent-metric"><span>Catalyst</span><strong id="grok-catalyst" style="font-size:11px;font-weight:400;">—</strong></div>
+      </div>
+      <div class="agent-rationale" id="grok-rationale">Awaiting analysis…</div>
+    </div>
+  </div>
+
+  <!-- Claude -->
+  <div class="agent-card agent-card--claude" id="card-claude">
+    <div class="agent-card-header">
+      <div class="agent-icon claude-icon">C</div>
+      <div>
+        <div class="agent-name">Claude</div>
+        <div class="agent-role">NexoSignal Executor · 5:1 Risk-Reward Enforcer</div>
+      </div>
+      <span class="signal-badge" id="claude-signal-badge">—</span>
+    </div>
+    <div class="agent-body">
+      <div class="agent-metric-row">
+        <div class="agent-metric"><span>Confidence</span><strong id="claude-conf">—</strong></div>
+        <div class="agent-metric"><span>Sentiment</span><strong id="claude-sentiment">—</strong></div>
+        <div class="agent-metric"><span>Take Profit</span><strong id="claude-target">—</strong></div>
+        <div class="agent-metric"><span>Stop Loss</span><strong id="claude-sl">—</strong></div>
+        <div class="agent-metric"><span>R:R Ratio</span><strong id="claude-rr">—</strong></div>
+      </div>
+      <div class="agent-rationale" id="claude-rationale">Awaiting analysis…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Local LLM Master -->
+<div class="agent-card agent-card--master master-card-full" id="card-master">
+  <div class="agent-card-header">
+    <div class="agent-icon master-icon">M</div>
+    <div>
+      <div class="agent-name">Local LLM Master <span class="master-local-pill">Runs Locally · Ollama</span></div>
+      <div class="agent-role">NexoSignal Orchestrator · Synthesises Gemini + Grok + Claude → Final Verdict</div>
+    </div>
+    <span class="signal-badge" id="master-signal-badge">—</span>
+  </div>
+  <div class="agent-body">
+    <div class="agent-metric-row">
+      <div class="agent-metric"><span>Confidence</span><strong id="master-conf">—</strong></div>
+      <div class="agent-metric"><span>Agreement</span><strong id="master-sentiment">—</strong></div>
+      <div class="agent-metric"><span>Take Profit</span><strong id="master-target">—</strong></div>
+      <div class="agent-metric"><span>Stop Loss</span><strong id="master-sl">—</strong></div>
+      <div class="agent-metric"><span>R:R Ratio</span><strong id="master-rr">—</strong></div>
+    </div>
+    <div class="agent-rationale master-rationale" id="master-rationale">Awaiting master synthesis…</div>
+  </div>
+</div>
+
+<!-- Consensus + 5:1 verdict -->
+<div class="consensus-panel" id="consensus-panel">
+  <div class="consensus-left">
+    <div class="consensus-label">NexoSignal Master Decision</div>
+    <div class="consensus-signal" id="consensus-signal">—</div>
+    <div class="consensus-conf" id="consensus-conf">Confidence: —</div>
+  </div>
+  <div class="consensus-center">
+    <div class="rr-meter-label">Risk : Reward Ratio (5:1 required)</div>
+    <div class="rr-meter-bar">
+      <div class="rr-meter-fill" id="rr-meter-fill" style="width:0%"></div>
+      <div class="rr-meter-target" title="5:1 minimum"></div>
+    </div>
+    <div class="rr-meter-values">
+      <span>0</span><span>2.5</span>
+      <span class="rr-target-marker">5.0 ✓</span>
+      <span>7.5</span><span>10+</span>
+    </div>
+    <div class="rr-actual" id="rr-actual">R:R — </div>
+  </div>
+  <div class="consensus-right">
+    <div class="verdict-box" id="verdict-box">
+      <div class="verdict-icon" id="verdict-icon">⏳</div>
+      <div class="verdict-text" id="verdict-text">Awaiting Research</div>
+      <div class="verdict-sub" id="verdict-sub">Run analysis to see the Master LLM trade decision</div>
+    </div>
+  </div>
+</div>
+
+<!-- Trade level badges -->
+<div class="trade-levels hidden" id="trade-levels">
+  <div class="level-card level-entry"><span>Entry Price</span><strong id="tl-entry">—</strong></div>
+  <div class="level-card level-sl"><span>Stop Loss</span><strong id="tl-sl">—</strong></div>
+  <div class="level-card level-tp"><span>Take Profit</span><strong id="tl-tp">—</strong></div>
+  <div class="level-card level-rr"><span>R:R Ratio</span><strong id="tl-rr">—</strong></div>
+</div>
+
+<!-- ════ Intelligence Section ══════════════════════════════════════════════ -->
+<div class="res-section-divider">
+  <span>Intelligence Panel</span>
+</div>
+
+<div class="intel-grid">
+
+  <!-- Macro Regime -->
+  <div class="intel-card">
+    <div class="intel-card-head">
+      <span class="intel-label">Macro Regime</span>
+      <span class="pill {% if macro and macro.regime == 'risk_on' %}chip-good{% elif macro and macro.regime in ('risk_off','stagflation') %}chip-bad{% else %}chip-muted{% endif %}" id="regime-pill">
+        {{ macro.regime.replace('_',' ').upper() if macro else 'NO DATA' }}
+      </span>
+    </div>
+    <div class="intel-macro-row">
+      <div class="intel-stat"><span>10yr Yield</span><strong>{{ "%.2f%%"|format(macro.dgs10) if macro and macro.dgs10 else "—" }}</strong></div>
+      <div class="intel-stat"><span>2yr Yield</span><strong>{{ "%.2f%%"|format(macro.dgs2) if macro and macro.dgs2 else "—" }}</strong></div>
+      <div class="intel-stat"><span>Spread</span><strong class="{{ 'bad' if macro and macro.spread is not none and macro.spread < 0 else 'good' }}">{{ "%+.3f%%"|format(macro.spread) if macro and macro.spread is not none else "—" }}</strong></div>
+      <div class="intel-stat"><span>Jobless Claims</span><strong>{{ "{:,.0f}".format(macro.jobless_claims) if macro and macro.jobless_claims else "—" }}</strong></div>
+    </div>
+    <div class="intel-caption">Refreshed every Sunday 8 AM ET via FRED API</div>
+  </div>
+
+  <!-- Guard Risk Metrics -->
+  <div class="intel-card">
+    <div class="intel-card-head">
+      <span class="intel-label">Guard Risk Metrics</span>
+      <span class="pill chip-muted">VaR · 95% confidence</span>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead><tr><th>Symbol</th><th>1-Day VaR $</th><th>VaR %</th><th>Corr Flag</th></tr></thead>
+        <tbody>
+          {% for r in risk_metrics[:8] %}
+          <tr>
+            <td><strong>{{ r.symbol }}</strong></td>
+            <td>${{ "%.2f"|format(r.var_1d or 0) }}</td>
+            <td class="{{ 'bad' if (r.var_1d_pct or 0) > 0.03 else '' }}">{{ "%.2f%%"|format((r.var_1d_pct or 0) * 100) }}</td>
+            <td>{% if r.correlation_flag %}<span class="pill chip-bad" style="font-size:10px">FLAGGED</span>{% else %}<span class="pill chip-good" style="font-size:10px">OK</span>{% endif %}</td>
+          </tr>
+          {% else %}<tr><td colspan="4" class="empty">No risk metrics yet</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Scout Watchlist -->
+  <div class="intel-card intel-card--wide">
+    <div class="intel-card-head">
+      <span class="intel-label">Scout Watchlist Leaderboard</span>
+      <span class="pill chip-muted">Rebuilt every Saturday 8 AM</span>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead>
+          <tr><th>#</th><th>Symbol</th><th>Category</th><th>Score</th><th>Growth</th><th>Value</th><th>Sentiment</th></tr>
+        </thead>
+        <tbody>
+          {% for w in watchlist[:15] %}
+          <tr>
+            <td class="muted">{{ w.rank_position }}</td>
+            <td><strong class="mkt-sym-link" onclick="document.getElementById('ai-symbol-input').value='{{ w.symbol }}'; window.scrollTo(0,0)">{{ w.symbol }}</strong></td>
+            <td><span class="pill chip-muted" style="font-size:10px">{{ w.category or '—' }}</span></td>
+            <td><div class="score-bar"><div class="score-fill" style="width:{{ w.composite_score or 0 }}%"></div><span>{{ "%.0f"|format(w.composite_score or 0) }}</span></div></td>
+            <td class="muted">{{ "%.0f"|format(w.score_growth or 0) }}</td>
+            <td class="muted">{{ "%.0f"|format(w.score_value or 0) }}</td>
+            <td class="muted">{{ "%.0f"|format(w.score_sentiment or 0) }}</td>
+          </tr>
+          {% else %}<tr><td colspan="7" class="empty">No watchlist yet — Scout runs Saturday 8 AM ET</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Insider Activity -->
+  <div class="intel-card">
+    <div class="intel-card-head">
+      <span class="intel-label">Insider Activity</span>
+      <span class="pill chip-muted">SEC Form 4</span>
+    </div>
+    <div class="insider-feed">
+      {% for ins in insiders %}
+      <div class="insider-row {{ 'insider-buy' if ins.transaction_type == 'purchase' else 'insider-sell' if ins.transaction_type == 'sale' else '' }}">
+        <div class="insider-symbol">{{ ins.symbol }}</div>
+        <div class="insider-details">
+          <strong>{{ ins.insider_name or 'Unknown' }}</strong>
+          <span class="muted">{{ ins.title or '' }}</span>
+        </div>
+        <div class="insider-tx">
+          <span class="pill {{ 'chip-good' if ins.transaction_type == 'purchase' else 'chip-bad' if ins.transaction_type == 'sale' else 'chip-muted' }}">
+            {{ ins.transaction_type or '?' }}
+          </span>
+          {% if ins.shares %}<span class="muted" style="font-size:11px">{{ "{:,.0f}".format(ins.shares) }} shares</span>{% endif %}
+        </div>
+        <div class="muted" style="font-size:11px">{{ ins.filed_at[:10] if ins.filed_at else '' }}</div>
+      </div>
+      {% else %}<div class="empty">No insider filings yet</div>{% endfor %}
+    </div>
+  </div>
+
+  <!-- Telemetry -->
+  <div class="intel-card intel-card--wide">
+    <div class="intel-card-head">
+      <span class="intel-label">Performance Telemetry</span>
+      <span class="pill chip-muted">Latency · Slippage · Win Rate · PnL</span>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead><tr><th>Stage</th><th>Symbol</th><th>Latency</th><th>Slippage</th><th>Win Rate</th><th>PnL</th><th>Uptime</th></tr></thead>
+        <tbody>
+          {% for e in performance_events[:10] %}
+          <tr>
+            <td><strong>{{ e.stage }}</strong></td>
+            <td>{{ e.symbol or "ALL" }}</td>
+            <td>{{ "%.0f ms"|format(e.latency_ms) if e.latency_ms is not none else "—" }}</td>
+            <td>{{ "%.2f bps"|format(e.slippage_bps) if e.slippage_bps is not none else "—" }}</td>
+            <td>{{ "%.1f%%"|format(e.win_rate) if e.win_rate is not none else "—" }}</td>
+            <td class="{{ 'good' if (e.mark_to_market_pnl or 0) >= 0 else 'bad' }}">
+              {{ "$%.2f"|format(e.mark_to_market_pnl) if e.mark_to_market_pnl is not none else "—" }}
+            </td>
+            <td>{{ e.uptime_seconds or 0 }}s</td>
+          </tr>
+          {% else %}<tr><td colspan="7" class="empty">No telemetry yet — start the agent</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── AI Research (same logic as before, adapted for standalone page) ────────
+function setSigBadge(id, sig) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = sig ? sig.toUpperCase() : '—';
+  el.className = 'signal-badge' + (sig === 'buy' ? ' buy' : sig === 'sell' ? ' sell' : sig === 'hold' ? ' hold' : '');
+}
+
+function populateAgent(prefix, data) {
+  if (!data) return;
+  setSigBadge(prefix + '-signal-badge', data.signal);
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val ?? '—'; };
+  set(prefix + '-conf',      data.confidence != null ? data.confidence.toFixed(0) + '/100' : null);
+  set(prefix + '-sentiment', data.sentiment);
+  set(prefix + '-target',    data.price_target  ? '$' + data.price_target.toFixed(2) : null);
+  set(prefix + '-sl',        data.stop_loss     ? '$' + data.stop_loss.toFixed(2) : null);
+  set(prefix + '-rr',        data.risk_reward_ratio ? data.risk_reward_ratio.toFixed(2) + ':1' : null);
+  if (prefix === 'grok') { const el = document.getElementById('grok-catalyst'); if (el) el.textContent = data.news_catalyst || '—'; }
+  const r = document.getElementById(prefix + '-rationale');
+  if (r) r.textContent = data.rationale || 'No rationale returned.';
+  if (data.error) { const r2 = document.getElementById(prefix + '-rationale'); if (r2) r2.textContent = '⚠ ' + data.error; }
+}
+
+async function runAIResearch() {
+  const sym = document.getElementById('ai-symbol-input').value.trim().toUpperCase();
+  if (!sym) { alert('Enter a symbol first.'); return; }
+
+  const loading = document.getElementById('ai-loading');
+  const btn = document.getElementById('ai-run-btn');
+  loading.classList.remove('hidden');
+  btn.disabled = true;
+
+  // Reset
+  ['gemini','grok','claude','master'].forEach(p => {
+    setSigBadge(p + '-signal-badge', null);
+    ['conf','sentiment','target','sl','rr','catalyst'].forEach(k => {
+      const el = document.getElementById(p + '-' + k);
+      if (el) el.textContent = '—';
+    });
+    const rat = document.getElementById(p + '-rationale');
+    if (rat) rat.textContent = 'Analyzing…';
+  });
+  document.getElementById('consensus-signal').textContent = '—';
+  document.getElementById('consensus-conf').textContent = 'Confidence: —';
+  document.getElementById('verdict-icon').textContent = '⏳';
+  document.getElementById('verdict-text').textContent = 'Analyzing…';
+  document.getElementById('verdict-sub').textContent = '';
+  document.getElementById('verdict-box').className = 'verdict-box';
+  document.getElementById('rr-meter-fill').style.width = '0%';
+  document.getElementById('rr-actual').textContent = 'R:R —';
+  document.getElementById('trade-levels').classList.add('hidden');
+
+  try {
+    const r = await fetch('/api/ai-research/' + encodeURIComponent(sym));
+    const data = await r.json();
+
+    if (data.error) {
+      document.getElementById('verdict-text').textContent = '⚠ ' + data.error;
+      loading.classList.add('hidden');
+      btn.disabled = false;
+      return;
+    }
+
+    populateAgent('gemini', data.gemini);
+    populateAgent('grok',   data.grok);
+    populateAgent('claude', data.claude);
+    populateAgent('master', data.local_master);
+
+    // Consensus
+    const sig = data.consensus_signal || '—';
+    const conf = data.consensus_confidence != null ? data.consensus_confidence.toFixed(0) : '—';
+    document.getElementById('consensus-signal').textContent = sig.toUpperCase();
+    document.getElementById('consensus-conf').textContent = 'Confidence: ' + conf + '/100';
+
+    // R:R meter
+    const rr = data.risk_reward_ratio || 0;
+    const rrPct = Math.min(100, (rr / 10) * 100);
+    document.getElementById('rr-meter-fill').style.width = rrPct + '%';
+    document.getElementById('rr-actual').textContent = 'R:R ' + (rr > 0 ? rr.toFixed(2) : '—');
+
+    // Verdict
+    const vbox = document.getElementById('verdict-box');
+    if (data.approved_5to1) {
+      vbox.className = 'verdict-box approved';
+      document.getElementById('verdict-icon').textContent = '✅';
+      document.getElementById('verdict-text').textContent = 'TRADE APPROVED';
+      document.getElementById('verdict-sub').textContent = sig.toUpperCase() + ' · ' + conf + '/100 confidence · 5:1 R:R met';
+    } else {
+      vbox.className = 'verdict-box rejected';
+      document.getElementById('verdict-icon').textContent = '🚫';
+      document.getElementById('verdict-text').textContent = 'TRADE REJECTED';
+      document.getElementById('verdict-sub').textContent = 'Does not meet 5:1 R:R or confidence threshold.';
+    }
+
+    // Trade levels
+    if (data.entry_price) {
+      document.getElementById('tl-entry').textContent = '$' + data.entry_price.toFixed(2);
+      document.getElementById('tl-sl').textContent    = data.stop_loss  ? '$' + data.stop_loss.toFixed(2)  : '—';
+      document.getElementById('tl-tp').textContent    = data.take_profit ? '$' + data.take_profit.toFixed(2) : '—';
+      document.getElementById('tl-rr').textContent    = rr > 0 ? rr.toFixed(2) + ':1' : '—';
+      document.getElementById('trade-levels').classList.remove('hidden');
+    }
+
+  } catch(e) {
+    document.getElementById('verdict-text').textContent = '⚠ Error: ' + e.message;
+  } finally {
+    loading.classList.add('hidden');
+    btn.disabled = false;
+  }
+}
+
+// Keyboard shortcut: Enter in search
+document.getElementById('ai-symbol-input')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') runAIResearch();
+});
+
+// Pre-fill from URL params
+const urlSym = new URLSearchParams(window.location.search).get('symbol');
+if (urlSym) {
+  document.getElementById('ai-symbol-input').value = urlSym;
+  runAIResearch();
+}
+</script>
+{% endblock %}

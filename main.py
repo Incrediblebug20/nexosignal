@@ -15,6 +15,7 @@ from rich import box
 from trading_agent import config
 from trading_agent.broker import AlpacaBroker, BrokerError
 from trading_agent.agent import NexoSignalAgent
+from trading_agent.runtime import AgentRuntime
 from trading_agent.strategy import STRATEGIES
 from trading_agent.restrictions import RejectedOrder
 
@@ -91,7 +92,8 @@ def manual_order(broker: AlpacaBroker, side: str, symbol: str, qty: float):
         console.print(f"[bold red]Order failed:[/bold red] {e}")
 
 
-def interactive_menu(broker: AlpacaBroker, agent: NexoSignalAgent):
+def interactive_menu(broker: AlpacaBroker, runtime: AgentRuntime):
+    agent = runtime.agent
     console.print("\n[bold]Commands:[/bold] status | quote <SYM> | buy <SYM> <qty> | sell <SYM> <qty> | "
                   "start | stop | log | quit\n")
     while True:
@@ -105,7 +107,7 @@ def interactive_menu(broker: AlpacaBroker, agent: NexoSignalAgent):
         cmd = parts[0].lower()
 
         if cmd in ("quit", "exit", "q"):
-            agent.stop()
+            runtime.stop()
             break
         elif cmd == "status":
             show_status(broker)
@@ -116,15 +118,13 @@ def interactive_menu(broker: AlpacaBroker, agent: NexoSignalAgent):
         elif cmd == "sell" and len(parts) >= 3:
             manual_order(broker, "sell", parts[1].upper(), float(parts[2]))
         elif cmd == "start":
-            if agent._running:
+            if runtime.is_running:
                 console.print("[yellow]Agent is already running.[/yellow]")
             else:
-                import threading
-                t = threading.Thread(target=agent.run, daemon=True)
-                t.start()
-                console.print("[green]Agent started in background.[/green]")
+                runtime.start()
+                console.print("[green]Agent runtime started in background.[/green]")
         elif cmd == "stop":
-            agent.stop()
+            runtime.stop()
             console.print("[yellow]Agent stopping…[/yellow]")
         elif cmd == "log":
             for entry in agent.log[-20:]:
@@ -163,13 +163,20 @@ def main():
         poll_interval_sec=args.interval,
         dry_run=args.dry_run,
     )
+    runtime = AgentRuntime(agent)
 
     show_status(broker)
 
     if args.auto:
-        agent.run()
+        try:
+            runtime.start()
+            import time
+            while runtime.is_running:
+                time.sleep(5)
+        except KeyboardInterrupt:
+            runtime.stop()
     else:
-        interactive_menu(broker, agent)
+        interactive_menu(broker, runtime)
 
     console.print("[dim]Goodbye.[/dim]")
 

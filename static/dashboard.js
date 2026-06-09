@@ -24,6 +24,7 @@ function applyChartDefaults() {
 let confidenceChart = null;
 let directionChart = null;
 let approvalChart = null;
+let portfolioChart = null;
 
 function initCharts() {
   applyChartDefaults();
@@ -31,6 +32,7 @@ function initCharts() {
   const confCanvas = document.getElementById("confidenceChart");
   const dirCanvas  = document.getElementById("directionChart");
   const appCanvas  = document.getElementById("approvalChart");
+  const portCanvas = document.getElementById("portfolioChart");
 
   if (confCanvas) {
     confidenceChart = new Chart(confCanvas, {
@@ -133,6 +135,31 @@ function initCharts() {
     });
   }
 
+  if (portCanvas) {
+    portfolioChart = new Chart(portCanvas, {
+      type: "doughnut",
+      data: {
+        labels: ["Cash"],
+        datasets: [
+          {
+            data: [1],
+            backgroundColor: ["rgba(147,164,183,0.45)"],
+            borderColor: ["#344252"],
+            borderWidth: 1,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: "68%",
+        plugins: {
+          legend: { position: "bottom", labels: { padding: 12, boxWidth: 11 } },
+        },
+      },
+    });
+  }
+
   // Initial load
   refreshCharts();
   // Auto-refresh every 30s
@@ -200,14 +227,48 @@ async function refreshMetrics() {
     if (el("m-portfolio")) el("m-portfolio").textContent = fmt(d.portfolio_value);
     if (el("m-cash"))      el("m-cash").textContent      = fmt(d.cash);
     if (el("m-bp"))        el("m-bp").textContent        = fmt(d.buying_power);
+    if (el("cockpit-equity")) el("cockpit-equity").textContent = fmt(d.portfolio_value);
+    if (el("cockpit-cash"))   el("cockpit-cash").textContent   = fmt(d.cash);
+    if (el("cockpit-bp"))     el("cockpit-bp").textContent     = fmt(d.buying_power);
 
     if (el("m-upl") && d.total_unrealized_pl !== undefined) {
       const pl = d.total_unrealized_pl;
       el("m-upl").innerHTML = `<span class="${pl >= 0 ? "good" : "bad"}">${fmt(pl)}</span>`;
     }
+    if (el("cockpit-upl") && d.total_unrealized_pl !== undefined) {
+      const pl = d.total_unrealized_pl;
+      el("cockpit-upl").textContent = fmt(pl);
+      el("cockpit-upl").className = pl >= 0 ? "good" : "bad";
+    }
+
+    updatePortfolioChart(d);
   } catch (e) {
     // silent — broker may be offline
   }
+}
+
+function updatePortfolioChart(data) {
+  if (!portfolioChart) return;
+  const positions = Array.isArray(data.positions) ? data.positions : [];
+  const labels = positions.map((p) => p.symbol);
+  const values = positions.map((p) => Math.max(0, Number(p.market_value || 0)));
+  const cash = Math.max(0, Number(data.cash || 0));
+  labels.push("Cash");
+  values.push(cash);
+
+  const palette = [
+    "rgba(0,201,141,0.85)",
+    "rgba(138,180,255,0.82)",
+    "rgba(245,159,0,0.82)",
+    "rgba(173,127,255,0.82)",
+    "rgba(49,196,255,0.78)",
+    "rgba(147,164,183,0.45)",
+  ];
+
+  portfolioChart.data.labels = labels;
+  portfolioChart.data.datasets[0].data = values;
+  portfolioChart.data.datasets[0].backgroundColor = labels.map((_, i) => palette[i % palette.length]);
+  portfolioChart.update("none");
 }
 
 // ── AI Research Panel ──────────────────────────────────────────────────────
@@ -235,6 +296,7 @@ async function runAIResearch() {
     renderAgentCard("gemini", d.gemini, d.current_price);
     renderAgentCard("grok",   d.grok,   d.current_price);
     renderAgentCard("claude", d.claude,  d.current_price);
+    renderMasterCard(d.local_master, d.local_llm_enabled, d.ollama_model);
     renderConsensus(d);
 
   } catch (e) {
@@ -257,13 +319,23 @@ function clearAIPanel() {
     setText(`${p}-rationale`, "Awaiting analysis…");
     if (p === "grok") setText("grok-catalyst", "—");
   });
+  // Master card reset
+  setText("master-signal-badge", "—");
+  setClass("master-signal-badge", "signal-badge");
+  setText("master-conf", "—");
+  setText("master-sentiment", "—");
+  setText("master-target", "—");
+  setText("master-sl", "—");
+  setText("master-rr", "—");
+  setText("master-rationale", "Awaiting master synthesis…");
+
   setText("consensus-signal", "—");
   setText("consensus-conf", "Confidence: —");
   setText("rr-actual", "R:R —");
   setStyle("rr-meter-fill", "width", "0%");
   setText("verdict-icon", "⏳");
   setText("verdict-text", "Awaiting Research");
-  setText("verdict-sub", "Run analysis to see Claude's trade decision");
+  setText("verdict-sub", "Run analysis to see the Master LLM trade decision");
   setClass("verdict-box", "verdict-box");
   document.getElementById("trade-levels")?.classList.add("hidden");
 }
@@ -303,10 +375,13 @@ function renderConsensus(d) {
   setStyle("rr-meter-fill", "width", `${pct}%`);
   setText("rr-actual", rr != null ? `R:R ${rr.toFixed(2)}:1 ${rr >= (d.min_ratio_required || 5) ? "✓" : "✗"}` : "R:R —");
 
-  if (d.approved_5to1) {
+  const masterActive = d.local_llm_enabled && d.local_master && !d.local_master.error;
+  const approverLabel = masterActive ? "Local Master" : "Claude";
+
+  if (d.approved_5to1 && d.master_decision && d.master_decision.approved) {
     setText("verdict-icon", "✅");
     setText("verdict-text", "TRADE APPROVED");
-    setText("verdict-sub", `Claude confirmed ${(rr || 0).toFixed(2)}:1 ratio ≥ ${d.min_ratio_required || 5}:1 minimum`);
+    setText("verdict-sub", `${approverLabel} confirmed ${(rr || 0).toFixed(2)}:1 ratio ≥ ${d.min_ratio_required || 5}:1 minimum`);
     setClass("verdict-box", "verdict-box approved");
 
     // Show trade levels
@@ -323,16 +398,52 @@ function renderConsensus(d) {
     setText("verdict-icon", isHold ? "⏸" : "❌");
     setText("verdict-text", isHold ? "NO CLEAR SIGNAL" : "TRADE REJECTED");
     const rrStr = rr != null ? ` (R:R ${rr.toFixed(2)}:1 < ${d.min_ratio_required || 5}:1 required)` : "";
-    setText("verdict-sub", `Claude did not approve${rrStr}`);
+    setText("verdict-sub", `${approverLabel} did not approve${rrStr}`);
     setClass("verdict-box", "verdict-box rejected");
     document.getElementById("trade-levels")?.classList.add("hidden");
   }
+}
+
+function renderMasterCard(data, localLlmEnabled, ollamaModel) {
+  const card = document.getElementById("card-master");
+  if (!card) return;
+
+  if (!localLlmEnabled) {
+    // Dim the card and show disabled state
+    card.classList.add("master-disabled");
+    setText("master-rationale", `Local Master LLM is disabled. Set LOCAL_LLM_ENABLED=true in .env and run Ollama (${ollamaModel || "mistral"}) locally to activate.`);
+    setText("master-signal-badge", "OFF");
+    return;
+  }
+
+  card.classList.remove("master-disabled");
+
+  if (!data) {
+    setText("master-rationale", "⚠ No data returned from master.");
+    return;
+  }
+
+  const badge = document.getElementById("master-signal-badge");
+  if (badge) {
+    badge.textContent = data.signal ? data.signal.toUpperCase() : "—";
+    badge.className = `signal-badge ${data.signal || ""}`;
+  }
+
+  setText("master-conf",      data.confidence != null ? `${data.confidence.toFixed(0)}/100` : (data.error ? "Error" : "—"));
+  // sentiment field stores agent_agreement level for the master
+  const agreementLabels = { full: "Full", partial: "Partial", none: "None" };
+  setText("master-sentiment", agreementLabels[data.sentiment] || data.sentiment || "—");
+  setText("master-target",    data.price_target != null ? `$${data.price_target.toFixed(2)}` : "—");
+  setText("master-sl",        data.stop_loss    != null ? `$${data.stop_loss.toFixed(2)}`    : "—");
+  setText("master-rr",        data.risk_reward_ratio != null ? `${data.risk_reward_ratio.toFixed(2)}:1` : "—");
+  setText("master-rationale", data.error ? `⚠ ${data.error}` : (data.rationale || "No master verdict provided"));
 }
 
 function showAIError(msg) {
   ["gemini", "grok", "claude"].forEach((p) => {
     setText(`${p}-rationale`, `⚠ ${msg}`);
   });
+  setText("master-rationale", `⚠ ${msg}`);
 }
 
 // ── 5:1 Risk Calculator ────────────────────────────────────────────────────
@@ -410,6 +521,9 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(refreshMetrics, 60_000);
 
   bindAISymbolInput();
+
+  // SocketIO realtime listeners
+  initSocketIO();
 
   // Auto-scroll bot log to bottom
   const log = document.getElementById("bot-log");
@@ -503,6 +617,78 @@ async function refreshIntelligence() {
 function _setText(id, value) {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
+}
+
+// ── SocketIO Phase 2 realtime listeners ─────────────────────────────────────
+
+function initSocketIO() {
+  if (typeof io === "undefined") return;
+
+  const socket = io({ transports: ["websocket", "polling"] });
+
+  socket.on("connect", () => console.log("[NexoSignal] Realtime socket connected"));
+  socket.on("disconnect", () => console.log("[NexoSignal] Realtime socket disconnected"));
+
+  socket.on("watchlist_rebuilt", (data) => {
+    refreshIntelligence();
+    showToast(`Scout rebuilt watchlist — ${data.count ?? "?"} symbols`);
+  });
+
+  socket.on("macro_refreshed", (data) => {
+    refreshIntelligence();
+    const regime = (data.regime || "neutral").replace(/_/g, " ");
+    showToast(`Macro regime updated: ${regime}`);
+  });
+
+  socket.on("insider_parsed", (data) => {
+    if ((data.total_saved || 0) > 0) {
+      refreshIntelligence();
+      showToast(`Lens parsed ${data.total_saved} insider filing${data.total_saved === 1 ? "" : "s"}`);
+    }
+  });
+
+  socket.on("circuit_breaker_update", (data) => {
+    const msg = data.reason ? `Circuit breaker: ${data.reason}` : "Circuit breaker tripped";
+    showToast(msg, data.active ? "error" : "info");
+    refreshMetrics();
+  });
+
+  socket.on("position_update", () => {
+    refreshMetrics();
+  });
+
+  // ── Order fill notification ─────────────────────────────────────────
+  socket.on("order_fill", (data) => {
+    const sym    = data.symbol || "";
+    const status = (data.status || "").replace(/_/g, " ");
+    const qty    = data.filled_qty    ? ` ${data.filled_qty} shares` : "";
+    const price  = data.filled_avg_price
+      ? ` @ $${parseFloat(data.filled_avg_price).toFixed(2)}`
+      : "";
+    const type = status === "filled" ? "success" : "info";
+    showToast(`Order ${status}: ${sym}${qty}${price}`, type);
+    if (status === "filled") refreshMetrics();
+    // Update status badge on Trade page if visible
+    const badge = document.querySelector(
+      `[data-order-id="${data.order_id}"] .order-status-badge`
+    );
+    if (badge) {
+      badge.textContent = status;
+      badge.className = `order-status-badge ${status === "filled" ? "chip-good" : "chip-muted"}`;
+    }
+  });
+}
+
+function showToast(message, type = "info") {
+  const el = document.createElement("div");
+  el.className = `toast toast--${type}`;
+  el.textContent = message;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("toast--visible"));
+  setTimeout(() => {
+    el.classList.remove("toast--visible");
+    setTimeout(() => el.remove(), 350);
+  }, 3700);
 }
 
 // Expose for inline onclick handlers

@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+{% block title %}Portfolio{% endblock %}
+
+{% block content %}
+{% if connection_error %}
+  <div class="notice error">{{ connection_error }}</div>
+{% endif %}
+
+{% set ns = namespace(upl=0.0, total_mv=0.0) %}
+{% for p in positions %}
+  {% set ns.upl = ns.upl + p.unrealized_pl|float %}
+  {% set ns.total_mv = ns.total_mv + p.market_value|float %}
+{% endfor %}
+
+<!-- ════ Page header ════════════════════════════════════════════════════════ -->
+<div class="pf-header">
+  <div>
+    <h1 class="pf-title">My Portfolio</h1>
+    <p class="pf-sub">Alpaca · {{ config.TRADING_MODE|upper }} mode · Auto-refresh every 30s</p>
+  </div>
+  <div class="pf-header-badges">
+    <span class="ns-chip {% if clock and clock.is_open %}chip-good{% else %}chip-muted{% endif %}">
+      <span class="live-dot {% if clock and clock.is_open %}dot-green{% else %}dot-red{% endif %}"></span>
+      Market {{ "Open" if clock and clock.is_open else "Closed" }}
+    </span>
+    <span class="ns-chip {% if agent.running %}chip-good{% else %}chip-muted{% endif %}">
+      <span class="live-dot {% if agent.running %}dot-green{% else %}dot-gray{% endif %}"></span>
+      Agent {{ "Running" if agent.running else "Stopped" }}
+    </span>
+    <span class="ns-chip {% if config.TRADING_MODE == 'live' %}chip-bad{% else %}chip-muted{% endif %}">
+      {{ config.TRADING_MODE|upper }}
+    </span>
+  </div>
+</div>
+
+<!-- ════ Account summary strip ══════════════════════════════════════════════ -->
+<div class="pf-strip">
+  <div class="pf-strip-card pf-strip-equity">
+    <span class="pf-strip-label">Portfolio Value</span>
+    <strong class="pf-strip-val" id="pf-equity">
+      {% if account %}${{ "{:,.2f}".format(account.portfolio_value|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="pf-strip-sub">Total equity</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Cash</span>
+    <strong class="pf-strip-val" id="pf-cash">
+      {% if account %}${{ "{:,.2f}".format(account.cash|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="pf-strip-sub">Available</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Buying Power</span>
+    <strong class="pf-strip-val" id="pf-bp">
+      {% if account %}${{ "{:,.2f}".format(account.buying_power|float) }}{% else %}—{% endif %}
+    </strong>
+    <span class="pf-strip-sub">Alpaca</span>
+  </div>
+  <div class="pf-strip-card {% if ns.upl >= 0 %}pf-strip-pos{% else %}pf-strip-neg{% endif %}">
+    <span class="pf-strip-label">Unrealized P&amp;L</span>
+    <strong class="pf-strip-val {{ 'good' if ns.upl >= 0 else 'bad' }}" id="pf-upl">
+      {{ ("+" if ns.upl >= 0 else "") + "$" + "{:,.2f}".format(ns.upl) }}
+    </strong>
+    <span class="pf-strip-sub">Open positions</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Positions</span>
+    <strong class="pf-strip-val">{{ positions|length }}</strong>
+    <span class="pf-strip-sub">Open</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Trades Today</span>
+    <strong class="pf-strip-val">{{ summary.total or 0 }}</strong>
+    <span class="pf-strip-sub">NexoSignal Ledger</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Avg Confidence</span>
+    <strong class="pf-strip-val">
+      {% if signal_summary.avg_confidence %}{{ "%.0f"|format(signal_summary.avg_confidence|float) }}<small>/100</small>{% else %}—{% endif %}
+    </strong>
+    <span class="pf-strip-sub">AlphaCore score</span>
+  </div>
+</div>
+
+<!-- ════ Main content: holdings + charts ══════════════════════════════════ -->
+<div class="pf-main-grid">
+
+  <!-- Holdings table (left, wider) -->
+  <div class="pf-card pf-holdings-card">
+    <div class="pf-card-head">
+      <h2>Holdings</h2>
+      <span class="ns-chip chip-muted">{{ positions|length }} positions</span>
+    </div>
+
+    <div class="pf-table-wrap">
+      <table class="pf-table">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Qty</th>
+            <th>Avg Entry</th>
+            <th>Current Price</th>
+            <th>Market Value</th>
+            <th>Day P/L</th>
+            <th>Total Return</th>
+            <th>% of Portfolio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in positions %}
+          {% set mv = p.market_value|float %}
+          {% set pct_portfolio = (mv / ns.total_mv * 100) if ns.total_mv > 0 else 0 %}
+          <tr class="pf-row">
+            <td>
+              <div class="pf-sym-cell">
+                <strong class="pf-sym">{{ p.symbol }}</strong>
+              </div>
+            </td>
+            <td>{{ p.qty }}</td>
+            <td>${{ "%.2f"|format(p.avg_entry_price|float) if p.avg_entry_price else "—" }}</td>
+            <td class="pf-cur-price">${{ "%.2f"|format(p.current_price|float) if p.current_price else "—" }}</td>
+            <td>${{ "{:,.2f}".format(mv) }}</td>
+            <td class="{{ 'good' if p.unrealized_pl|float >= 0 else 'bad' }}">
+              {{ ("+" if p.unrealized_pl|float >= 0 else "") }}${{ "%.2f"|format(p.unrealized_pl|float) }}
+            </td>
+            <td class="{{ 'good' if p.unrealized_plpc|float >= 0 else 'bad' }}">
+              {{ ("+" if p.unrealized_plpc|float >= 0 else "") }}{{ "%.2f"|format((p.unrealized_plpc|float)*100) }}%
+            </td>
+            <td>
+              <div class="pf-alloc-bar">
+                <div class="pf-alloc-fill" style="width:{{ [pct_portfolio, 100]|min }}%"></div>
+                <span>{{ "%.1f"|format(pct_portfolio) }}%</span>
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="8" class="empty">No open positions — start the agent or place a manual order from the Trade page</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sidebar: allocation chart + execution flow -->
+  <div class="pf-sidebar">
+
+    <div class="pf-card">
+      <div class="pf-card-head">
+        <h2>Allocation</h2>
+        <span class="ns-chip chip-muted">Donut</span>
+      </div>
+      <div class="pf-chart-body">
+        <canvas id="portfolioChart"></canvas>
+      </div>
+    </div>
+
+    <div class="pf-card">
+      <div class="pf-card-head">
+        <h2>Execution Pipeline</h2>
+        <span class="ns-chip chip-muted">4 steps</span>
+      </div>
+      <div class="execution-flow" style="margin:0">
+        <div class="flow-step done"><span>1</span>Signal</div>
+        <div class="flow-step {{ 'done' if signal_summary.approved else '' }}"><span>2</span>Guard</div>
+        <div class="flow-step {{ 'done' if trades|length else '' }}"><span>3</span>Order</div>
+        <div class="flow-step {{ 'done' if positions|length else '' }}"><span>4</span>Position</div>
+      </div>
+    </div>
+
+    <div class="pf-card">
+      <div class="pf-card-head">
+        <h2>Guard Limits</h2>
+        <span class="ns-chip chip-purple">Active</span>
+      </div>
+      <div class="risk-stack" style="grid-template-columns:1fr 1fr">
+        <div><span>Max Order</span><b>${{ "{:,.0f}".format(config.MAX_ORDER_VALUE_USD|float) }}</b></div>
+        <div><span>Daily Loss</span><b>{{ "%.0f"|format(config.DAILY_LOSS_LIMIT_PCT|float * 100) }}%</b></div>
+        <div><span>Min Score</span><b>{{ "%.0f"|format(config.SIGNAL_MIN_CONFIDENCE|float) }}/100</b></div>
+        <div><span>Min R:R</span><b>{{ config.AI_MIN_RISK_REWARD_RATIO }}:1</b></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════ Open Orders ════════════════════════════════════════════════════════ -->
+<div class="pf-card" style="margin-bottom:18px">
+  <div class="pf-card-head">
+    <h2>Open Orders</h2>
+    <span class="ns-chip chip-muted">{{ open_orders|length }} pending</span>
+  </div>
+  <div class="pf-table-wrap">
+    <table class="pf-table">
+      <thead>
+        <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        {% for o in open_orders %}
+        <tr data-order-id="{{ o.id }}">
+          <td><strong>{{ o.symbol }}</strong></td>
+          <td class="{{ 'good' if o.side == 'buy' else 'bad' }}">{{ o.side|upper }}</td>
+          <td>{{ o.qty }}</td>
+          <td class="muted">{{ o.type or 'market' }}</td>
+          <td><span class="order-status-badge status-tag status-warn">{{ o.status }}</span></td>
+          <td>
+            <form method="post" action="{{ url_for('cancel_order', order_id=o.id) }}" style="margin:0">
+              <button class="ns-btn-ghost" style="font-size:11px;min-height:26px;padding:3px 10px;color:var(--bad)" type="submit">Cancel</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">No open orders</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ Performance Charts ════════════════════════════════════════════════ -->
+<div class="pf-charts-row">
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>AlphaCore Confidence Trend</h2>
+      <span class="ns-chip chip-muted">Last 30 signals</span>
+    </div>
+    <div style="height:200px;position:relative">
+      <canvas id="confidenceChart"></canvas>
+    </div>
+  </div>
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>Direction Split</h2>
+      <span class="ns-chip chip-muted">All time</span>
+    </div>
+    <div style="height:200px;position:relative">
+      <canvas id="directionChart"></canvas>
+    </div>
+  </div>
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>Approval Rate</h2>
+      <span class="ns-chip chip-muted">Guard filter</span>
+    </div>
+    <div style="height:200px;position:relative">
+      <canvas id="approvalChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ════ Execution Tape ═════════════════════════════════════════════════════ -->
+<div class="pf-card" style="margin-bottom:18px">
+  <div class="pf-card-head">
+    <h2>Recent Trade Events</h2>
+    <span class="ns-chip chip-purple">Ledger</span>
+  </div>
+  <div class="pf-table-wrap">
+    <table class="pf-table">
+      <thead>
+        <tr>
+          <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+          <th>Status</th><th>Price</th><th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in trades[:20] %}
+        <tr>
+          <td class="mono">{{ t.created_at[:19].replace("T"," ") }}</td>
+          <td><strong>{{ t.symbol }}</strong></td>
+          <td class="{{ 'good' if t.side == 'buy' else 'bad' }}">{{ t.side|upper }}</td>
+          <td>{{ t.qty }}</td>
+          <td>
+            <span class="status-tag {{ 'status-ok' if t.status in ('filled','submitted') else ('status-warn' if t.status == 'dry_run' else 'status-err') }}">
+              {{ t.status }}{% if t.dry_run %} /dry{% endif %}
+            </span>
+          </td>
+          <td>{% if t.price is not none %}${{ "%.2f"|format(t.price|float) }}{% endif %}</td>
+          <td class="muted">{{ t.source }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No trade events yet — start the agent from the Trade page</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ Agent Log ══════════════════════════════════════════════════════════ -->
+<div class="pf-card">
+  <div class="pf-card-head">
+    <h2>Agent Log</h2>
+    <span class="ns-chip {{ 'chip-good' if agent.running else 'chip-muted' }}">
+      {{ agent.strategy or "Stopped" }}
+    </span>
+  </div>
+  <div class="log" id="bot-log">
+    {% for entry in agent.log %}
+      <div class="log-entry log-{{ entry.level }}">
+        <span class="log-time">{{ entry.time }}</span>
+        <span>{{ entry.msg }}</span>
+      </div>
+    {% else %}
+      <div class="log-entry">No log entries — agent not running</div>
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+// ── Auto-refresh metrics every 30s ───────────────────────────
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/live-metrics');
+    if (!r.ok) return;
+    const d = await r.json();
+    const fmt = n => '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+    const el = id => document.getElementById(id);
+    if (el('pf-equity')) el('pf-equity').textContent = fmt(d.portfolio_value);
+    if (el('pf-cash'))   el('pf-cash').textContent   = fmt(d.cash);
+    if (el('pf-bp'))     el('pf-bp').textContent     = fmt(d.buying_power);
+    if (el('pf-upl')) {
+      const upl = d.total_unrealized_pl;
+      el('pf-upl').textContent = (upl >= 0 ? '+' : '') + fmt(Math.abs(upl));
+      el('pf-upl').className = 'pf-strip-val ' + (upl >= 0 ? 'good' : 'bad');
+    }
+  } catch(e) {}
+}, 30000);
+</script>
+{% endblock %}

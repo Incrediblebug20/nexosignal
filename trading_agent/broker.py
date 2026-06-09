@@ -4,13 +4,17 @@ Only order execution, account info, and market data are exposed.
 Fund transfer endpoints are deliberately absent.
 """
 
+import logging
 import aiohttp
 import requests
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 from . import config
 from .restrictions import assert_no_transfer, check_order, get_tracker, RejectedOrder
 from .strategy import is_supported_crypto, normalize_symbol
+
+logger = logging.getLogger("trading_agent.broker")
 
 
 class BrokerError(Exception):
@@ -89,8 +93,9 @@ class AlpacaBroker:
         return self._get("/v2/positions")
 
     def get_position(self, symbol: str) -> Optional[dict]:
+        symbol = normalize_symbol(symbol)
         try:
-            return self._get(f"/v2/positions/{symbol.upper()}")
+            return self._get(f"/v2/positions/{quote(symbol, safe='')}")
         except BrokerError:
             return None
 
@@ -118,7 +123,9 @@ class AlpacaBroker:
         time_in_force: str = "day",
     ) -> dict:
         """Place a market order after passing all safety checks."""
-        symbol = symbol.upper()
+        symbol = normalize_symbol(symbol)
+        if is_supported_crypto(symbol) and time_in_force == "day":
+            time_in_force = "gtc"
 
         # Fetch live price for restriction checks
         price = self.get_last_price(symbol)
@@ -259,6 +266,29 @@ class AlpacaBroker:
                 data = await resp.json()
         return data if isinstance(data, dict) else {}
 
+    def get_order(self, order_id: str) -> dict:
+        """Return an Alpaca order object by ID."""
+        return self._get(f"/v2/orders/{order_id}")
+
+    def get_bulk_snapshots_sync(self, symbols: list[str]) -> dict[str, dict]:
+        """Synchronous bulk snapshot for a list of US equity symbols.
+
+        Returns a dict keyed by symbol. Each value contains latestTrade,
+        latestQuote, minuteBar, dailyBar, prevDailyBar as sub-dicts.
+        Falls back to an empty dict on any error.
+        """
+        if not symbols:
+            return {}
+        try:
+            data = self._get(
+                "/v2/stocks/snapshots",
+                params={"symbols": ",".join(s.upper() for s in symbols), "feed": "iex"},
+                base=self._data_base,
+            )
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def get_quote(self, symbol: str) -> dict:
         data = self._get(
             f"/v2/stocks/{symbol.upper()}/quotes/latest",
@@ -305,7 +335,12 @@ class TelegramNotifier:
         if not self.enabled:
             return
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        requests.post(url, json={"chat_id": self.chat_id, "text": message}, timeout=10)
+        try:
+            resp = requests.post(url, json={"chat_id": self.chat_id, "text": message}, timeout=10)
+            if not resp.ok:
+                logger.warning("Telegram alert failed (HTTP %s): %s", resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("Telegram alert could not be delivered: %s", exc)
 
     def daily_picks_alert(self, picks: list) -> None:
         today = datetime.now().strftime("%Y-%m-%d")

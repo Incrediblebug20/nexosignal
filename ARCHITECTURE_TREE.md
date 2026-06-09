@@ -36,6 +36,7 @@ AI Agent ploymarket/
 |-- vercel.json                      # Vercel routing/build config
 |-- DASHBOARD_README.md
 |-- ARCHITECTURE_TREE.md
+|-- PROJECT_STRUCTURE_ANALYSIS.md   # Layers, modules, data flow, entry points
 |-- PROJECT_SUMMARY_REPORT.md
 `-- VERCEL_DEPLOYMENT.md
 ```

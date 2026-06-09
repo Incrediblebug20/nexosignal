@@ -184,6 +184,14 @@ Set the same environment variables in Vercel.
 
 Important: Vercel serverless functions should not run the continuous trading loop. Use Vercel for the dashboard only. Run the bot locally, on a VPS, or on a persistent worker host.
 
+## Documentation
+
+- `PROJECT_STRUCTURE_ANALYSIS.md` — architecture layers, module map, data flow, and entry points
+- `ARCHITECTURE_TREE.md` — folder tree and cleanup notes
+- `DASHBOARD_README.md` — dashboard quickstart
+- `VERCEL_DEPLOYMENT.md` — Vercel + Supabase deployment
+- `PROJECT_SUMMARY_REPORT.md` — detailed feature summary
+
 ## Safety Notes
 
 - Start with Alpaca paper trading.

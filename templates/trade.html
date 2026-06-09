@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+{% block title %}Trade{% endblock %}
+
+{% block content %}
+
+<!-- ════ Page header ════════════════════════════════════════════════════════ -->
+<div class="tr-header">
+  <div>
+    <h1 class="pf-title">Trade</h1>
+    <p class="pf-sub">Algo strategies · Manual orders · 5:1 Risk calculator · Brokerage connections</p>
+  </div>
+</div>
+
+<!-- ════ BIG Paper / Live Toggle ════════════════════════════════════════════ -->
+<div class="tr-mode-card">
+  <div class="tr-mode-left">
+    <div class="tr-mode-title">Trading Mode</div>
+    <div class="tr-mode-desc">
+      {% if config.TRADING_MODE == 'live' %}
+        <span class="bad">⚠ LIVE — Real money is being used. Orders execute immediately on your brokerage.</span>
+      {% else %}
+        <span class="good">✓ PAPER — Safe simulation mode. No real orders are placed.</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="tr-mode-center">
+    <div class="tr-mode-display {{ 'tr-mode-live' if config.TRADING_MODE == 'live' else 'tr-mode-paper' }}">
+      <span class="tr-mode-icon">{{ '⚡' if config.TRADING_MODE == 'live' else '📋' }}</span>
+      <span class="tr-mode-text">{{ config.TRADING_MODE|upper }}</span>
+    </div>
+  </div>
+  <div class="tr-mode-right">
+    <div class="tr-toggle-group">
+      <button class="tr-toggle-opt {{ 'tr-toggle-active-paper' if config.TRADING_MODE == 'paper' else '' }}"
+              onclick="setMode('paper')" id="btn-paper">
+        📋 Paper Trading
+        <span class="tr-toggle-sub">Simulated · No risk</span>
+      </button>
+      <button class="tr-toggle-opt {{ 'tr-toggle-active-live' if config.TRADING_MODE == 'live' else '' }}"
+              onclick="setMode('live')" id="btn-live">
+        ⚡ Live Trading
+        <span class="tr-toggle-sub">Real money · Real orders</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ 3-column layout ════════════════════════════════════════════════════ -->
+<div class="tr-grid">
+
+  <!-- Col 1: Algo Strategy Runner -->
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>Algo Strategy Runner</h2>
+      <span class="ns-chip {{ 'chip-good' if agent.running else 'chip-muted' }}">
+        {{ "Running" if agent.running else "Stopped" }}
+      </span>
+    </div>
+    <form class="form-grid" method="post" action="{{ url_for('start_bot') }}">
+      <label class="span2">
+        Symbols
+        <input name="symbols" value="{{ ','.join(config.DEFAULT_DASHBOARD_SYMBOLS) }}" required
+               placeholder="AAPL,TSLA,BTC/USD,ETH/USD">
+      </label>
+      <label>
+        Strategy
+        <select name="strategy">
+          {% for strategy in strategies %}
+            <option value="{{ strategy }}">{{ strategy }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Qty / Trade
+        <input name="qty" type="number" min="0.0001" step="0.0001" value="1" required>
+      </label>
+      <label>
+        Interval (s)
+        <input name="interval" type="number" min="5" step="1" value="60" required>
+      </label>
+      <label class="check span2">
+        <input name="dry_run" type="checkbox" {% if config.TRADING_MODE == 'paper' %}checked{% endif %}>
+        Dry run (paper mode — recommended)
+      </label>
+      <button type="submit" class="span2">▶ Start NexoSignal Agent</button>
+    </form>
+    <form method="post" action="{{ url_for('stop_bot') }}">
+      <button class="danger w-full" type="submit">■ Stop Agent</button>
+    </form>
+
+    <!-- Strategy descriptions -->
+    <div class="tr-strategy-info" id="tr-strategy-info">
+      <div class="intel-caption" style="margin-top:14px">
+        <strong>Available strategies:</strong>
+        {% for s in strategies %}
+          <div style="margin-top:6px"><code>{{ s }}</code></div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Col 2: Manual Order + Order Book -->
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>Manual Order</h2>
+      <span class="ns-chip chip-muted">Instant execution</span>
+    </div>
+    <form class="form-grid" method="post" action="{{ url_for('manual_order') }}">
+      <label>
+        Symbol
+        <input name="symbol" id="manual-symbol" value="{{ prefill_symbol or 'AAPL' }}" required>
+      </label>
+      <label>
+        Side
+        <select name="side" id="manual-side">
+          <option value="buy" {{ 'selected' if prefill_side == 'buy' else '' }}>Buy</option>
+          <option value="sell" {{ 'selected' if prefill_side == 'sell' else '' }}>Sell</option>
+        </select>
+      </label>
+      <label>
+        Quantity
+        <input name="qty" type="number" min="0.0001" step="0.0001" value="1" required>
+      </label>
+      <label class="check">
+        <input name="dry_run" type="checkbox" {% if config.TRADING_MODE == 'paper' %}checked{% endif %}>
+        Dry run
+      </label>
+      <button id="manual-submit-btn" type="submit" class="span2">Submit Order</button>
+    </form>
+
+    <!-- AlphaCore gate -->
+    <div class="nexosignal-manual-panel">
+      <div class="nexosignal-gauge" aria-label="Confluence score gauge">
+        <div class="gauge-ring" id="confluence-gauge" style="--score:0">
+          <strong id="confluence-value">0</strong>
+          <span>Confluence</span>
+        </div>
+      </div>
+      <div class="imbalance-shell">
+        <div class="imbalance-meta">
+          <span>Order Book Imbalance</span>
+          <strong id="imbalance-value">0.00</strong>
+        </div>
+        <div class="imbalance-track">
+          <div class="imbalance-fill" id="imbalance-fill"></div>
+        </div>
+        <div class="intel-caption" style="margin-top:8px">
+          Buy gate requires AlphaCore ≥ 70. Run Research to generate confluence score.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Col 3: 5:1 Risk Calculator -->
+  <div class="pf-card">
+    <div class="pf-card-head">
+      <h2>5:1 Risk Calculator</h2>
+      <span class="ns-chip chip-purple">Claude Enforced</span>
+    </div>
+    <div class="risk-calc">
+      <label>
+        Symbol
+        <div class="input-btn-row">
+          <input id="rc-symbol" type="text" placeholder="AAPL" value="{{ prefill_symbol or 'AAPL' }}">
+          <button type="button" onclick="fetchRCPrice()" class="ghost small">Fetch</button>
+        </div>
+      </label>
+      <label>
+        Entry Price ($)
+        <input id="rc-entry" type="number" step="0.01" placeholder="0.00">
+      </label>
+      <label>
+        Risk Per Unit ($) <span class="muted" style="font-weight:400;font-size:11px;">= stop distance (ATR)</span>
+        <input id="rc-risk" type="number" step="0.01" placeholder="ATR-based">
+      </label>
+      <button type="button" onclick="calcRiskReward()">Calculate 5:1 Levels</button>
+      <div class="rc-results hidden" id="rc-results">
+        <div class="rc-row"><span>Stop Loss</span><strong id="rc-sl">—</strong></div>
+        <div class="rc-row"><span>Take Profit (5:1)</span><strong id="rc-tp">—</strong></div>
+        <div class="rc-row"><span>Max Loss / share</span><strong id="rc-maxloss" class="bad">—</strong></div>
+        <div class="rc-row"><span>Target Gain / share</span><strong id="rc-gain" class="good">—</strong></div>
+        <div class="rc-row rr-row"><span>Risk : Reward</span><strong id="rc-rr" class="good">5.0 : 1</strong></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ════ Live Executor Tracker ══════════════════════════════════════════════ -->
+<div class="pf-card" style="margin-bottom:18px">
+  <div class="pf-card-head">
+    <h2>Live Executor Tracker</h2>
+    <span class="ns-chip chip-purple" id="circuit-breaker-pill">Guard: Inactive</span>
+  </div>
+  <div id="autonomous-tracks" class="autonomous-tracks">
+    <div class="empty">No active autonomous trades yet — start the agent above</div>
+  </div>
+</div>
+
+<!-- ════ Brokerage Connections ══════════════════════════════════════════════ -->
+<div class="pf-card" style="margin-bottom:18px">
+  <div class="pf-card-head">
+    <h2>Brokerage Connections</h2>
+    <span class="ns-chip chip-muted">{{ brokerages|length }} configured</span>
+  </div>
+  <form class="form-grid" method="post" action="{{ url_for('add_brokerage_connection') }}">
+    <label>
+      Provider
+      <select name="provider">
+        <option value="alpaca">Alpaca</option>
+        <option value="interactive_brokers">Interactive Brokers</option>
+        <option value="schwab">Charles Schwab</option>
+        <option value="tradier">Tradier</option>
+        <option value="robinhood">Robinhood</option>
+        <option value="coinbase">Coinbase</option>
+        <option value="binance">Binance</option>
+        <option value="kraken">Kraken</option>
+        <option value="other">Other</option>
+      </select>
+    </label>
+    <label>Account Label<input name="account_label" placeholder="Paper Alpaca account" required></label>
+    <label>Account ID<input name="account_id" placeholder="Optional"></label>
+    <label>
+      Environment
+      <select name="environment">
+        <option value="paper">Paper</option>
+        <option value="live">Live</option>
+        <option value="sandbox">Sandbox</option>
+      </select>
+    </label>
+    <label>
+      Status
+      <select name="status">
+        <option value="manual">Manual</option>
+        <option value="connected">Connected</option>
+        <option value="pending">Pending</option>
+        <option value="disabled">Disabled</option>
+      </select>
+    </label>
+    <label>API Key Last 4<input name="api_key_last4" maxlength="4" placeholder="Optional"></label>
+    <label class="span2">Notes<input name="notes" placeholder="OAuth, permissions, asset classes…"></label>
+    <button type="submit">Add Connection</button>
+  </form>
+
+  <div class="pf-table-wrap mt">
+    <table class="pf-table">
+      <thead>
+        <tr><th>Provider</th><th>Label</th><th>Account ID</th><th>Environment</th><th>Status</th><th>Key</th><th>Added</th></tr>
+      </thead>
+      <tbody>
+        {% for b in brokerages %}
+        <tr>
+          <td><strong>{{ b.provider }}</strong></td>
+          <td>{{ b.account_label }}</td>
+          <td class="mono">{{ b.account_id or "" }}</td>
+          <td><span class="ns-chip {{ 'chip-bad' if b.environment == 'live' else 'chip-good' }}" style="font-size:10px">{{ b.environment }}</span></td>
+          <td><span class="status-tag {{ 'status-ok' if b.status == 'connected' else 'status-warn' if b.status == 'pending' else 'status-err' if b.status == 'disabled' else 'status-warn' }}">{{ b.status }}</span></td>
+          <td class="mono">{% if b.api_key_last4 %}****{{ b.api_key_last4 }}{% endif %}</td>
+          <td class="muted">{{ b.created_at|string|truncate(10, True, "") }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No brokerage connections yet</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ MetaMask Wallet ════════════════════════════════════════════════════ -->
+<div class="pf-card" style="margin-bottom:18px">
+  <div class="pf-card-head">
+    <h2>MetaMask Wallet</h2>
+    <button class="ns-btn-ghost" type="button" data-connect-metamask>Connect Wallet</button>
+  </div>
+  <div class="wallet-info">
+    <span data-wallet-status class="wallet-address">
+      {% if wallet %}<span class="good">{{ wallet.wallet_address }}</span>
+      {% else %}No wallet connected.{% endif %}
+    </span>
+    <span class="muted" style="font-size:11px">Only public address stored. Private keys never enter this dashboard.</span>
+  </div>
+</div>
+
+<script>
+// ── Trading mode toggle ──────────────────────────────────────
+async function setMode(mode) {
+  if (mode === 'live') {
+    const ok = confirm('⚠ Switch to LIVE trading?\n\nThis uses REAL money. All orders will execute on your brokerage immediately.\n\nProceed?');
+    if (!ok) return;
+  }
+  try {
+    const r = await fetch('/api/toggle-mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode})
+    });
+    if (r.ok) window.location.reload();
+    else alert('Failed to switch mode');
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Manual order gate ────────────────────────────────────────
+const socket = window.io ? window.io() : null;
+const submitBtn = document.getElementById('manual-submit-btn');
+const sideSelect = document.getElementById('manual-side');
+const gauge = document.getElementById('confluence-gauge');
+const scoreVal = document.getElementById('confluence-value');
+const imbalVal = document.getElementById('imbalance-value');
+const imbalFill = document.getElementById('imbalance-fill');
+const tracks = document.getElementById('autonomous-tracks');
+const breakerPill = document.getElementById('circuit-breaker-pill');
+let currentScore = 0;
+
+function refreshGate() {
+  const isBuy = !sideSelect || sideSelect.value === 'buy';
+  const blocked = isBuy && currentScore < 70;
+  if (submitBtn) {
+    submitBtn.disabled = blocked;
+    submitBtn.title = blocked
+      ? 'Buy blocked: AlphaCore confluence must be ≥ 70. Run Research first.'
+      : 'Order allowed by current confluence gate.';
+  }
+}
+
+function setConfluence(payload) {
+  currentScore = Number(payload.confluence_score || 0);
+  const imbalance = Number(payload.order_book_imbalance || 0);
+  if (gauge) gauge.style.setProperty('--score', Math.max(0, Math.min(100, currentScore)));
+  if (scoreVal) scoreVal.textContent = currentScore.toFixed(0);
+  if (imbalVal) imbalVal.textContent = imbalance.toFixed(2);
+  const pct = Math.min(50, Math.abs(imbalance) * 50);
+  if (imbalFill) {
+    imbalFill.style.width = `${pct}%`;
+    imbalFill.style.marginLeft = imbalance < 0 ? `${50-pct}%` : '50%';
+    imbalFill.style.background = imbalance >= 0 ? '#00c98d' : '#ff4d5e';
+  }
+  refreshGate();
+}
+
+sideSelect?.addEventListener('change', refreshGate);
+refreshGate();
+if (socket) {
+  socket.on('confluence_update', setConfluence);
+  socket.on('position_update', upsertTrack);
+  socket.on('circuit_breaker_update', p => {
+    const active = Boolean(p.active);
+    if (breakerPill) {
+      breakerPill.textContent = `Guard: ${active ? 'ACTIVE' : 'Inactive'}`;
+      breakerPill.className = `ns-chip ${active ? 'chip-bad' : 'chip-purple'}`;
+    }
+  });
+}
+
+// ── Trade tracks ─────────────────────────────────────────────
+function positionToPct(entry, stop, target, current) {
+  const min = Math.min(stop, entry, target), max = Math.max(stop, entry, target);
+  return Math.max(0, Math.min(100, ((current - min) / Math.max(max - min, 0.0001)) * 100));
+}
+function upsertTrack(p) {
+  if (tracks?.querySelector('.empty')) tracks.innerHTML = '';
+  const symbol = p.symbol;
+  let row = document.getElementById(`track-${symbol}`);
+  const entry = Number(p.entry_price), stop = Number(p.stop_loss), target = Number(p.take_profit), current = Number(p.current_price);
+  const atr = Number(p.atr || 0);
+  const pct = positionToPct(entry, stop, target, current);
+  const pinClass = current < entry ? 'pin-red' : current >= entry + 2*atr ? 'pin-green' : 'pin-amber';
+  if (!row) { row = document.createElement('div'); row.className = 'trade-track'; row.id = `track-${symbol}`; tracks?.appendChild(row); }
+  row.innerHTML = `<strong>${symbol}</strong>
+    <div class="trade-rail">
+      <span class="trade-marker stop">SL $${stop.toFixed(2)}</span>
+      <span class="trade-marker entry">Entry $${entry.toFixed(2)}</span>
+      <span class="trade-marker target">TP $${target.toFixed(2)}</span>
+      <span class="trade-pin ${pinClass}" style="left:${pct}%"></span>
+    </div>
+    <span class="${current>=entry?'good':'bad'}">$${current.toFixed(2)}</span>`;
+}
+
+// ── Risk calculator ──────────────────────────────────────────
+async function fetchRCPrice() {
+  const sym = document.getElementById('rc-symbol')?.value?.trim()?.toUpperCase();
+  if (!sym) return;
+  try {
+    const r = await fetch('/api/price/' + sym);
+    const d = await r.json();
+    if (d.price) {
+      document.getElementById('rc-entry').value = d.price.toFixed(2);
+      if (d.atr) document.getElementById('rc-risk').value = d.atr.toFixed(4);
+    }
+  } catch(e) {}
+}
+function calcRiskReward() {
+  const entry = parseFloat(document.getElementById('rc-entry')?.value || 0);
+  const risk = parseFloat(document.getElementById('rc-risk')?.value || 0);
+  if (!entry || !risk) { alert('Enter entry price and risk per unit.'); return; }
+  const sl = entry - risk;
+  const tp = entry + risk * 5;
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  set('rc-sl', '$' + sl.toFixed(2));
+  set('rc-tp', '$' + tp.toFixed(2));
+  set('rc-maxloss', '-$' + risk.toFixed(2));
+  set('rc-gain', '+$' + (risk * 5).toFixed(2));
+  set('rc-rr', '5.0 : 1');
+  document.getElementById('rc-results')?.classList.remove('hidden');
+}
+
+// Pre-fill from URL
+const sp = new URLSearchParams(window.location.search);
+if (sp.get('symbol')) {
+  const sym = sp.get('symbol');
+  const el = document.getElementById('manual-symbol'); if (el) el.value = sym;
+  const rc = document.getElementById('rc-symbol'); if (rc) rc.value = sym;
+}
+if (sp.get('side')) {
+  const el = document.getElementById('manual-side'); if (el) el.value = sp.get('side');
+  refreshGate();
+}
+</script>
+
+<style>
+.nexosignal-manual-panel{margin-top:16px;display:grid;grid-template-columns:140px 1fr;gap:16px;align-items:center}
+.gauge-ring{--score:0;width:118px;height:118px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(#16a34a calc(var(--score)*1%),#e5e7eb 0);position:relative}
+.gauge-ring::after{content:"";position:absolute;width:88px;height:88px;border-radius:50%;background:var(--surface)}
+.gauge-ring strong,.gauge-ring span{position:relative;z-index:1}
+.gauge-ring strong{font-size:28px}
+.gauge-ring span{font-size:11px;color:var(--muted);margin-top:44px;position:absolute}
+.imbalance-meta{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;color:var(--muted)}
+.imbalance-track{height:14px;background:var(--surface3);border-radius:999px;position:relative;overflow:hidden}
+.imbalance-track::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--border-light)}
+.imbalance-fill{height:100%;width:0;background:#16a34a;transform-origin:left center;transition:all .25s ease}
+.autonomous-tracks{display:grid;gap:18px}
+.trade-track{display:grid;grid-template-columns:90px 1fr 76px;gap:14px;align-items:center}
+.trade-rail{height:8px;background:linear-gradient(90deg,#dc2626 0 35%,#64748b 35% 65%,#16a34a 65%);border-radius:999px;position:relative}
+.trade-marker{position:absolute;top:-20px;font-size:10px;color:var(--muted);transform:translateX(-50%)}
+.trade-marker.stop{left:0;color:#dc2626}.trade-marker.entry{left:50%}.trade-marker.target{left:100%;color:#16a34a}
+.trade-pin{position:absolute;top:-7px;width:22px;height:22px;border-radius:50%;background:#f59e0b;border:3px solid var(--surface);box-shadow:0 1px 6px rgba(0,0,0,.35);transform:translateX(-50%);transition:left .25s ease,background .25s ease}
+.trade-pin.pin-red{background:#dc2626}.trade-pin.pin-amber{background:#f59e0b}.trade-pin.pin-green{background:#16a34a}
+</style>
+{% endblock %}

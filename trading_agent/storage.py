@@ -1,20 +1,48 @@
 import json
+import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from functools import wraps
+from typing import Any, Callable, Iterator
 
 from . import config
+
+_storage_logger = logging.getLogger("trading_agent.storage")
+
+
+def _no_storage(default_factory: Callable | None = None):
+    """Decorator: turns a storage function into a silent no-op when SUPABASE_DB_URL is unset.
+
+    Write functions return ``None``; read functions return ``default_factory()``
+    (defaults to ``None``; pass ``list`` or ``dict`` for query functions).
+    """
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if not _storage_enabled():
+                _storage_logger.debug("Storage disabled — skipping %s", fn.__name__)
+                return default_factory() if default_factory is not None else None
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 _DB_INIT_LOCK = threading.Lock()
 _DB_INITIALIZED = False
 
 
+def _storage_enabled() -> bool:
+    """Return True when a Supabase/Postgres URL is configured."""
+    return bool(config.SUPABASE_DB_URL)
+
+
 @contextmanager
 def postgres_connect() -> Iterator[Any]:
-    if not config.SUPABASE_DB_URL:
-        raise RuntimeError("SUPABASE_DB_URL is required. This project stores trades in Supabase/Postgres only.")
-
+    if not _storage_enabled():
+        raise RuntimeError(
+            "SUPABASE_DB_URL is not set. Storage is disabled in dev mode. "
+            "Set SUPABASE_DB_URL in .env to enable Postgres persistence."
+        )
     import psycopg
     from psycopg.rows import dict_row
 
@@ -24,6 +52,8 @@ def postgres_connect() -> Iterator[Any]:
 
 def init_db() -> None:
     global _DB_INITIALIZED
+    if not _storage_enabled():
+        return  # dev mode: no-op
     if _DB_INITIALIZED:
         return
     with _DB_INIT_LOCK:
@@ -280,6 +310,7 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@_no_storage()
 def record_trade_event(
     *,
     source: str,
@@ -334,6 +365,29 @@ def record_trade_event(
         )
 
 
+@_no_storage(None)
+def update_trade_event_status(
+    order_id: str,
+    status: str,
+    filled_qty: float | None = None,
+    filled_avg_price: float | None = None,
+) -> None:
+    """Update the status (and fill details) of an existing trade event by order_id."""
+    init_db()
+    with postgres_connect() as conn:
+        conn.execute(
+            """
+            update trade_events
+               set status = %s,
+                   qty    = coalesce(%s, qty),
+                   price  = coalesce(%s, price)
+             where order_id = %s
+            """,
+            (status, filled_qty, filled_avg_price, order_id),
+        )
+
+
+@_no_storage(list)
 def list_trade_events(limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -349,6 +403,7 @@ def list_trade_events(limit: int = 100) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+@_no_storage(dict)
 def trade_summary() -> dict[str, Any]:
     init_db()
     with postgres_connect() as conn:
@@ -365,6 +420,7 @@ def trade_summary() -> dict[str, Any]:
     return dict(row)
 
 
+@_no_storage()
 def record_wallet_connection(wallet_address: str, user_agent: str | None = None) -> None:
     init_db()
     with postgres_connect() as conn:
@@ -377,6 +433,7 @@ def record_wallet_connection(wallet_address: str, user_agent: str | None = None)
         )
 
 
+@_no_storage()
 def latest_wallet_connection() -> dict[str, Any] | None:
     init_db()
     with postgres_connect() as conn:
@@ -391,6 +448,7 @@ def latest_wallet_connection() -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+@_no_storage()
 def record_brokerage_connection(
     *,
     provider: str,
@@ -448,6 +506,7 @@ def record_brokerage_connection(
         )
 
 
+@_no_storage(list)
 def list_brokerage_connections(limit: int = 50) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -463,6 +522,7 @@ def list_brokerage_connections(limit: int = 50) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+@_no_storage()
 def record_signal_event(
     *,
     symbol: str,
@@ -506,6 +566,7 @@ def record_signal_event(
         )
 
 
+@_no_storage(list)
 def list_signal_events(limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -536,6 +597,7 @@ def signal_summary() -> dict[str, Any]:
     return dict(row)
 
 
+@_no_storage()
 def record_agent_event(
     *,
     layer: str,
@@ -558,6 +620,7 @@ def record_agent_event(
         )
 
 
+@_no_storage(list)
 def list_agent_events(limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -575,6 +638,7 @@ def list_agent_events(limit: int = 100) -> list[dict[str, Any]]:
 
 # ── Phase 2: NexoSignal Scout — Watchlist Ledger ──────────────────────────
 
+@_no_storage()
 def upsert_watchlist_entry(
     *,
     symbol: str,
@@ -618,6 +682,7 @@ def upsert_watchlist_entry(
         )
 
 
+@_no_storage(list)
 def list_watchlist(limit: int = 50) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -634,6 +699,7 @@ def list_watchlist(limit: int = 50) -> list[dict[str, Any]]:
 
 # ── Phase 2: NexoSignal Lens — Macro Snapshots ────────────────────────────
 
+@_no_storage()
 def record_macro_snapshot(
     *,
     dgs10: float | None,
@@ -665,6 +731,7 @@ def latest_macro_snapshot() -> dict[str, Any] | None:
 
 # ── Phase 2: NexoSignal Lens — Insider Activity ───────────────────────────
 
+@_no_storage()
 def record_insider_activity(
     *,
     symbol: str,
@@ -681,12 +748,22 @@ def record_insider_activity(
             """
             insert into insider_activity
                 (filed_at, symbol, insider_name, title, transaction_type, shares, value)
-            values (%s, %s, %s, %s, %s, %s, %s)
+            select %s, %s, %s, %s, %s, %s, %s
+            where not exists (
+                select 1 from insider_activity
+                where symbol = %s
+                  and coalesce(insider_name, '') = coalesce(%s, '')
+                  and filed_at::date = %s::date
+            )
             """,
-            (filed_at, symbol.upper(), insider_name, title, transaction_type, shares, value),
+            (
+                filed_at, symbol.upper(), insider_name, title, transaction_type, shares, value,
+                symbol.upper(), insider_name, filed_at,
+            ),
         )
 
 
+@_no_storage(list)
 def list_insider_activity(limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -705,6 +782,7 @@ def list_insider_activity(limit: int = 50, symbol: str | None = None) -> list[di
 
 # ── Phase 2: NexoSignal Lens — Earnings Analysis ──────────────────────────
 
+@_no_storage()
 def record_earnings_analysis(
     *,
     symbol: str,
@@ -731,6 +809,7 @@ def record_earnings_analysis(
         )
 
 
+@_no_storage(list)
 def list_earnings_analysis(limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -749,6 +828,7 @@ def list_earnings_analysis(limit: int = 50, symbol: str | None = None) -> list[d
 
 # ── Phase 2: NexoSignal Lens — Annual Report Analysis ────────────────────
 
+@_no_storage()
 def record_annual_report_analysis(
     *,
     symbol: str,
@@ -776,6 +856,7 @@ def record_annual_report_analysis(
 
 # ── Phase 2: NexoSignal Guard — Risk Metrics ─────────────────────────────
 
+@_no_storage()
 def record_risk_metrics(
     *,
     symbol: str,
@@ -796,6 +877,7 @@ def record_risk_metrics(
         )
 
 
+@_no_storage(list)
 def list_risk_metrics(limit: int = 50) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:
@@ -808,6 +890,7 @@ def list_risk_metrics(limit: int = 50) -> list[dict[str, Any]]:
 
 # Phase 3: NexoSignal Telemetry
 
+@_no_storage()
 def record_performance_event(
     *,
     stage: str,
@@ -840,6 +923,7 @@ def record_performance_event(
         )
 
 
+@_no_storage(list)
 def list_performance_events(limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     with postgres_connect() as conn:

@@ -91,3 +91,10 @@ FRED_API_KEY      = os.getenv("FRED_API_KEY", "")         # FRED (St. Louis Fed,
 MAX_PORTFOLIO_VAR = float(os.getenv("MAX_PORTFOLIO_VAR", "0.02"))   # 2 % daily portfolio VaR hard limit
 WATCHLIST_SIZE    = int(os.getenv("WATCHLIST_SIZE", "30"))           # Scout: symbols to maintain
 FINBERT_MODEL_PATH = os.getenv("FINBERT_MODEL_PATH", "ProsusAI/finbert")  # HuggingFace FinBERT
+MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "alpaca,yahoo,tradingview").lower()
+TRADINGVIEW_WEBHOOK_SECRET = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "")
+
+# Phase C — Dev mode / structured logging
+# Set STRUCTURED_LOG_FILE to a path (e.g. "nexosignal.jsonl") to enable
+# one-JSON-object-per-line structured log output alongside the normal log.
+STRUCTURED_LOG_FILE = os.getenv("STRUCTURED_LOG_FILE", "")

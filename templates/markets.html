@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+{% block title %}Markets{% endblock %}
+
+{% block content %}
+
+<!-- ════ Page header ════════════════════════════════════════════════════════ -->
+<div class="mkt-header">
+  <div>
+    <h1 class="pf-title">Markets</h1>
+    <p class="pf-sub">US Equities · Asian Markets · Crypto · Real-time data</p>
+  </div>
+  <div class="mkt-header-right">
+    <span class="ns-chip {% if clock and clock.is_open %}chip-good{% else %}chip-bad{% endif %}">
+      <span class="live-dot {% if clock and clock.is_open %}dot-green{% else %}dot-red{% endif %}"></span>
+      NYSE/NASDAQ {{ "OPEN" if clock and clock.is_open else "CLOSED" }}
+    </span>
+    <button class="ns-btn-ghost" onclick="refreshMarketData()">↻ Refresh</button>
+  </div>
+</div>
+
+<!-- ════ Index summary strip ═══════════════════════════════════════════════ -->
+<div class="mkt-index-strip" id="mkt-index-strip">
+  <!-- JS populated from /api/market-data?type=indices -->
+  {% for idx in indices %}
+  <div class="mkt-idx-card">
+    <div class="mkt-idx-top">
+      <span class="mkt-idx-name">{{ idx.name }}</span>
+      <span class="mkt-idx-region muted">{{ idx.region }}</span>
+    </div>
+    <div class="mkt-idx-price">{{ idx.price }}</div>
+    <div class="mkt-idx-chg {{ 'good' if idx.change_pct >= 0 else 'bad' }}">
+      {{ "+" if idx.change_pct >= 0 else "" }}{{ "%.2f"|format(idx.change_pct) }}%
+      <span class="mkt-idx-abs">{{ "+" if idx.change >= 0 else "" }}{{ "%.2f"|format(idx.change) }}</span>
+    </div>
+    <div class="mkt-sparkline-placeholder {{ 'spark-up' if idx.change_pct >= 0 else 'spark-down' }}"></div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- ════ Market tabs ════════════════════════════════════════════════════════ -->
+<div class="mkt-tabs-row">
+  <!-- Region tabs -->
+  <div class="mkt-tab-group" id="mkt-region-tabs">
+    <button class="mkt-tab active" onclick="switchRegion('us', this)">🇺🇸 US Stocks</button>
+    <button class="mkt-tab" onclick="switchRegion('asia', this)">🌏 Asian Markets</button>
+    <button class="mkt-tab" onclick="switchRegion('crypto', this)">₿ Crypto</button>
+  </div>
+
+  <!-- Screen tabs (Most Active, Gainers, Losers) -->
+  <div class="mkt-screen-tabs" id="mkt-screen-tabs">
+    <button class="mkt-stab active" onclick="switchScreen('active', this)">Most Active</button>
+    <button class="mkt-stab" onclick="switchScreen('gainers', this)">Top Gainers</button>
+    <button class="mkt-stab" onclick="switchScreen('losers', this)">Top Losers</button>
+    <button class="mkt-stab" onclick="switchScreen('52wk_high', this)">52 Wk Gainers</button>
+    <button class="mkt-stab" onclick="switchScreen('52wk_low', this)">52 Wk Losers</button>
+  </div>
+</div>
+
+<!-- ════ Market table ═══════════════════════════════════════════════════════ -->
+<div class="mkt-table-card">
+  <div class="mkt-table-toolbar">
+    <div class="mkt-search-wrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input id="mkt-search" type="text" placeholder="Search symbol or name…" oninput="filterTable(this.value)">
+    </div>
+    <div class="mkt-view-btns">
+      <button class="mkt-view-btn active" id="mkt-table-btn" onclick="setView('table', this)">≡ Table</button>
+      <button class="mkt-view-btn" id="mkt-heat-btn" onclick="setView('heatmap', this)">▦ Heatmap</button>
+    </div>
+    <span class="mkt-last-update muted" id="mkt-last-update">Loading…</span>
+  </div>
+
+  <!-- TABLE VIEW -->
+  <div id="mkt-table-view" class="mkt-table-wrap">
+    <table class="mkt-table" id="mkt-main-table">
+      <thead>
+        <tr>
+          <th onclick="sortTable('symbol')" class="sortable">Symbol <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('name')" class="sortable">Name <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('price')" class="sortable mkt-num">Price <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('change')" class="sortable mkt-num">Change <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('change_pct')" class="sortable mkt-num">Change % <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('volume')" class="sortable mkt-num">Volume <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('avg_volume')" class="sortable mkt-num">Avg Vol (3M) <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('market_cap')" class="sortable mkt-num">Market Cap <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('pe_ratio')" class="sortable mkt-num">P/E (TTM) <span class="sort-icon">⇅</span></th>
+          <th onclick="sortTable('wk52_chg')" class="sortable mkt-num">52 Wk % <span class="sort-icon">⇅</span></th>
+          <th class="mkt-num">52 Wk Range</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="mkt-tbody">
+        <tr><td colspan="12" class="empty">Loading market data…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- HEATMAP VIEW -->
+  <div id="mkt-heatmap-view" style="display:none">
+    <div class="mkt-heatmap" id="mkt-heatmap">
+      <!-- JS populated -->
+    </div>
+  </div>
+</div>
+
+<!-- ════ Asian Markets Table ════════════════════════════════════════════════ -->
+<div id="mkt-asia-section" style="display:none">
+  <div class="mkt-table-card">
+    <div class="pf-card-head">
+      <h2>Asian Markets</h2>
+      <span class="ns-chip chip-muted">Major indices + stocks</span>
+    </div>
+    <div class="mkt-table-wrap">
+      <table class="mkt-table" id="mkt-asia-table">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Name</th><th>Exchange</th>
+            <th class="mkt-num">Price</th><th class="mkt-num">Change</th>
+            <th class="mkt-num">Change %</th><th class="mkt-num">Volume</th>
+            <th class="mkt-num">52 Wk %</th>
+          </tr>
+        </thead>
+        <tbody id="mkt-asia-tbody">
+          <tr><td colspan="8" class="empty">Loading Asian market data…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ════ Crypto Section ══════════════════════════════════════════════════════ -->
+<div id="mkt-crypto-section" style="display:none">
+  <div class="mkt-table-card">
+    <div class="pf-card-head">
+      <h2>Cryptocurrency</h2>
+      <span class="ns-chip chip-muted">Alpaca Crypto</span>
+    </div>
+    <div class="mkt-table-wrap">
+      <table class="mkt-table" id="mkt-crypto-table">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Name</th>
+            <th class="mkt-num">Price (USD)</th><th class="mkt-num">24h Change</th>
+            <th class="mkt-num">24h Change %</th><th class="mkt-num">Volume</th>
+            <th class="mkt-num">Market Cap</th><th class="mkt-num">7D %</th>
+          </tr>
+        </thead>
+        <tbody id="mkt-crypto-tbody">
+          <tr><td colspan="8" class="empty">Loading crypto data…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────
+let currentRegion = 'us';
+let currentScreen = 'active';
+let allRows = [];
+let sortKey = 'volume';
+let sortDir = -1; // -1 = desc
+
+// ── Helpers ──────────────────────────────────────────────────
+const fmtNum = n => n == null ? '—' : n >= 1e12 ? (n/1e12).toFixed(2)+'T' : n >= 1e9 ? (n/1e9).toFixed(2)+'B' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(2);
+const fmtPrice = n => n == null ? '—' : n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const fmtPct = n => n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+
+function fmtRange(low, high, cur) {
+  if (!low || !high) return '—';
+  const pct = Math.max(0, Math.min(100, ((cur - low) / (high - low)) * 100));
+  return `<div class="wk52-range">
+    <span class="wk52-low">${fmtPrice(low)}</span>
+    <div class="wk52-bar"><div class="wk52-fill" style="left:${pct}%"></div></div>
+    <span class="wk52-high">${fmtPrice(high)}</span>
+  </div>`;
+}
+
+// ── Render table rows ─────────────────────────────────────────
+function renderRows(rows) {
+  const tbody = document.getElementById('mkt-tbody');
+  if (!rows?.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">No data available</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const up = (r.change_pct || 0) >= 0;
+    const up52 = (r.wk52_chg || 0) >= 0;
+    return `<tr class="mkt-row" data-symbol="${r.symbol}">
+      <td><strong class="mkt-sym-link" onclick="goResearch('${r.symbol}')">${r.symbol}</strong></td>
+      <td class="mkt-name-cell">${r.name || '—'} <span class="data-source-badge">${r.source || '—'}</span></td>
+      <td class="mkt-num">${fmtPrice(r.price)}</td>
+      <td class="mkt-num ${up ? 'good' : 'bad'}">${r.change != null ? (up ? '+' : '') + fmtPrice(r.change) : '—'}</td>
+      <td class="mkt-num">
+        <span class="mkt-chg-badge ${up ? 'mkt-chg-up' : 'mkt-chg-down'}">${fmtPct(r.change_pct)}</span>
+      </td>
+      <td class="mkt-num muted">${fmtNum(r.volume)}</td>
+      <td class="mkt-num muted">${fmtNum(r.avg_volume)}</td>
+      <td class="mkt-num muted">${fmtNum(r.market_cap)}</td>
+      <td class="mkt-num muted">${r.pe_ratio != null ? r.pe_ratio.toFixed(2) : '—'}</td>
+      <td class="mkt-num ${up52 ? 'good' : 'bad'}">${fmtPct(r.wk52_chg)}</td>
+      <td>${fmtRange(r.wk52_low, r.wk52_high, r.price)}</td>
+      <td>
+        <div class="mkt-action-btns">
+          <button class="mkt-buy-btn" onclick="quickTrade('${r.symbol}','buy')">Buy</button>
+          <button class="mkt-sell-btn" onclick="quickTrade('${r.symbol}','sell')">Sell</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+  document.getElementById('mkt-last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── Load market data ──────────────────────────────────────────
+async function loadMarketData() {
+  try {
+    const r = await fetch(`/api/market-data?region=${currentRegion}&screen=${currentScreen}`);
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    allRows = data.stocks || [];
+    sortAndRender();
+
+    // Populate Asian / Crypto tables
+    if (data.asian?.length) renderAsia(data.asian);
+    if (data.crypto?.length) renderCrypto(data.crypto);
+  } catch(e) {
+    document.getElementById('mkt-tbody').innerHTML =
+      `<tr><td colspan="12" class="empty bad">Failed to load market data: ${e.message}</td></tr>`;
+  }
+}
+
+function renderAsia(rows) {
+  const tbody = document.getElementById('mkt-asia-tbody');
+  tbody.innerHTML = rows.map(r => {
+    const up = (r.change_pct||0) >= 0;
+    return `<tr>
+      <td><strong>${r.symbol}</strong></td>
+      <td>${r.name||'—'} <span class="data-source-badge">${r.source || '—'}</span></td>
+      <td class="muted">${r.exchange||'—'}</td>
+      <td class="mkt-num">${fmtPrice(r.price)}</td>
+      <td class="mkt-num ${up?'good':'bad'}">${r.change!=null?(up?'+':'')+fmtPrice(r.change):'—'}</td>
+      <td class="mkt-num"><span class="mkt-chg-badge ${up?'mkt-chg-up':'mkt-chg-down'}">${fmtPct(r.change_pct)}</span></td>
+      <td class="mkt-num muted">${fmtNum(r.volume)}</td>
+      <td class="mkt-num ${(r.wk52_chg||0)>=0?'good':'bad'}">${fmtPct(r.wk52_chg)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderCrypto(rows) {
+  const tbody = document.getElementById('mkt-crypto-tbody');
+  tbody.innerHTML = rows.map(r => {
+    const up = (r.change_pct||0) >= 0;
+    const up7 = (r.chg7d||0) >= 0;
+    return `<tr>
+      <td><strong class="mkt-sym-link" onclick="goResearch('${r.symbol}')">${r.symbol}</strong></td>
+      <td>${r.name||'—'} <span class="data-source-badge">${r.source || '—'}</span></td>
+      <td class="mkt-num">${fmtPrice(r.price)}</td>
+      <td class="mkt-num ${up?'good':'bad'}">${r.change!=null?(up?'+':'')+fmtPrice(r.change):'—'}</td>
+      <td class="mkt-num"><span class="mkt-chg-badge ${up?'mkt-chg-up':'mkt-chg-down'}">${fmtPct(r.change_pct)}</span></td>
+      <td class="mkt-num muted">${fmtNum(r.volume)}</td>
+      <td class="mkt-num muted">${fmtNum(r.market_cap)}</td>
+      <td class="mkt-num ${up7?'good':'bad'}">${fmtPct(r.chg7d)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Heatmap ───────────────────────────────────────────────────
+function renderHeatmap(rows) {
+  const container = document.getElementById('mkt-heatmap');
+  if (!rows?.length) { container.innerHTML = '<div class="empty">No data</div>'; return; }
+  container.innerHTML = rows.map(r => {
+    const pct = r.change_pct || 0;
+    const intensity = Math.min(Math.abs(pct) / 5, 1);
+    const color = pct >= 0
+      ? `rgba(0,201,141,${0.15 + intensity * 0.55})`
+      : `rgba(255,77,94,${0.15 + intensity * 0.55})`;
+    const size = r.market_cap ? Math.max(60, Math.min(160, Math.log10(r.market_cap + 1) * 16)) : 80;
+    return `<div class="heat-cell" style="background:${color};width:${size}px;height:${size}px"
+              onclick="goResearch('${r.symbol}')" title="${r.name||r.symbol}: ${fmtPct(pct)}">
+      <strong>${r.symbol}</strong>
+      <span class="${pct>=0?'good':'bad'}">${fmtPct(pct)}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Sorting ───────────────────────────────────────────────────
+function sortTable(key) {
+  if (sortKey === key) sortDir *= -1;
+  else { sortKey = key; sortDir = -1; }
+  sortAndRender();
+}
+function sortAndRender() {
+  const sorted = [...allRows].sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    if (av == null) return 1; if (bv == null) return -1;
+    if (typeof av === 'string') return sortDir * av.localeCompare(bv);
+    return sortDir * (av - bv);
+  });
+  renderRows(sorted);
+  if (document.getElementById('mkt-heatmap-view').style.display !== 'none') renderHeatmap(sorted);
+}
+
+// ── Filter ────────────────────────────────────────────────────
+function filterTable(q) {
+  const lower = q.toLowerCase();
+  const filtered = allRows.filter(r =>
+    r.symbol.toLowerCase().includes(lower) || (r.name||'').toLowerCase().includes(lower)
+  );
+  renderRows(filtered);
+}
+
+// ── Tab switching ─────────────────────────────────────────────
+function switchRegion(region, btn) {
+  currentRegion = region;
+  document.querySelectorAll('.mkt-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  // Show/hide sections
+  document.getElementById('mkt-table-view').closest('.mkt-table-card').style.display = region === 'crypto' ? 'none' : '';
+  document.getElementById('mkt-asia-section').style.display = region === 'asia' ? '' : 'none';
+  document.getElementById('mkt-crypto-section').style.display = region === 'crypto' ? '' : 'none';
+  document.getElementById('mkt-screen-tabs').style.display = region === 'us' ? 'flex' : 'none';
+  loadMarketData();
+}
+
+function switchScreen(screen, btn) {
+  currentScreen = screen;
+  document.querySelectorAll('.mkt-stab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadMarketData();
+}
+
+function setView(view, btn) {
+  document.querySelectorAll('.mkt-view-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('mkt-table-view').style.display = view === 'table' ? '' : 'none';
+  document.getElementById('mkt-heatmap-view').style.display = view === 'heatmap' ? '' : 'none';
+  if (view === 'heatmap') renderHeatmap(allRows);
+}
+
+function refreshMarketData() { loadMarketData(); }
+
+function goResearch(sym) {
+  window.location.href = '/research?symbol=' + encodeURIComponent(sym);
+}
+
+function quickTrade(sym, side) {
+  window.location.href = '/trade?symbol=' + encodeURIComponent(sym) + '&side=' + side;
+}
+
+// ── Init ──────────────────────────────────────────────────────
+loadMarketData();
+setInterval(loadMarketData, 60000);
+</script>
+{% endblock %}

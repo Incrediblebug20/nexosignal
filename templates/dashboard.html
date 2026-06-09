@@ -5,6 +5,9 @@
   <div class="notice error">{{ connection_error }}</div>
 {% endif %}
 
+{% set ns = namespace(upl=0.0) %}
+{% for p in positions %}{% set ns.upl = ns.upl + p.unrealized_pl|float %}{% endfor %}
+
 <section class="dashboard-hero" id="overview">
   <div>
     <p class="eyebrow">NexoSignal Operations Center</p>
@@ -25,9 +28,118 @@
   </div>
 </section>
 
+<section class="market-strip" aria-label="Market watch strip">
+  {% set strip = [
+    ("SPY", "S&P 500", "+0.30"),
+    ("QQQ", "Nasdaq", "+0.86"),
+    ("BTC/USD", "Bitcoin", "+3.21"),
+    ("ETH/USD", "Ethereum", "+1.44"),
+    ("SOL/USD", "Solana", "+2.08"),
+    ("VIX", "Volatility", "-1.20")
+  ] %}
+  {% for symbol, label, change in strip %}
+    <div class="market-tile">
+      <div>
+        <strong>{{ label }}</strong>
+        <span>{{ symbol }}</span>
+      </div>
+      <div class="sparkline {{ 'sparkline-red' if change.startswith('-') else '' }}"></div>
+      <b class="{{ 'bad' if change.startswith('-') else 'good' }}">{{ change }}%</b>
+    </div>
+  {% endfor %}
+</section>
+
+<section class="portfolio-cockpit" id="portfolio-cockpit">
+  <aside class="cockpit-sidebar">
+    <a href="#portfolio-cockpit" class="active">Portfolio</a>
+    <a href="#analytics">Signals</a>
+    <a href="#controls">Executor</a>
+    <a href="#autonomous-tracker">Live Trades</a>
+    <a href="#intelligence">Research</a>
+    <a href="#positions">Positions</a>
+    <a href="#trades">Ledger</a>
+  </aside>
+
+  <div class="cockpit-main">
+    <div class="cockpit-head">
+      <div>
+        <p class="eyebrow">Portfolio Command</p>
+        <h2>Live execution and allocation view</h2>
+      </div>
+      <div class="execution-mode">
+        <span class="pill {{ 'chip-bad' if config.TRADING_MODE == 'live' else 'chip-good' }}">{{ config.TRADING_MODE|upper }}</span>
+        <span class="pill {{ 'chip-good' if agent.running else 'chip-muted' }}">Agent {{ "Running" if agent.running else "Stopped" }}</span>
+      </div>
+    </div>
+
+    <div class="cockpit-grid">
+      <div class="terminal-card portfolio-summary-card">
+        <div class="terminal-head">
+          <h3>Account Equity</h3>
+          <span class="pill chip-muted">Alpaca</span>
+        </div>
+        <div class="equity-value" id="cockpit-equity">
+          {% if account %}${{ "{:,.2f}".format(account.portfolio_value|float) }}{% else %}-{% endif %}
+        </div>
+        <div class="equity-meta">
+          <span>Cash <b id="cockpit-cash">{% if account %}${{ "{:,.2f}".format(account.cash|float) }}{% else %}-{% endif %}</b></span>
+          <span>Buying Power <b id="cockpit-bp">{% if account %}${{ "{:,.2f}".format(account.buying_power|float) }}{% else %}-{% endif %}</b></span>
+        </div>
+        <div class="execution-flow">
+          <div class="flow-step done"><span>1</span>Signal</div>
+          <div class="flow-step {{ 'done' if signal_summary.approved else '' }}"><span>2</span>Guard</div>
+          <div class="flow-step {{ 'done' if trades|length else '' }}"><span>3</span>Order</div>
+          <div class="flow-step {{ 'done' if positions|length else '' }}"><span>4</span>Position</div>
+        </div>
+      </div>
+
+      <div class="terminal-card">
+        <div class="terminal-head">
+          <h3>Portfolio Allocation</h3>
+          <span class="pill chip-muted">{{ positions|length }} positions</span>
+        </div>
+        <div class="chart-body cockpit-chart">
+          <canvas id="portfolioChart"></canvas>
+        </div>
+      </div>
+
+      <div class="terminal-card">
+        <div class="terminal-head">
+          <h3>Execution Tape</h3>
+          <span class="pill chip-purple">Realtime</span>
+        </div>
+        <div class="execution-tape" id="execution-tape">
+          {% for t in trades[:8] %}
+            <div class="tape-row">
+              <span class="tape-time">{{ t.created_at[:19].replace("T", " ") }}</span>
+              <strong>{{ t.symbol }}</strong>
+              <span class="{{ 'good' if t.side == 'buy' else 'bad' }}">{{ t.side|upper }}</span>
+              <span>{{ t.qty }}</span>
+              <em>{{ t.status }}{% if t.dry_run %} / dry{% endif %}</em>
+            </div>
+          {% else %}
+            <div class="empty">No execution events yet</div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="terminal-card">
+        <div class="terminal-head">
+          <h3>Open Risk</h3>
+          <span class="pill chip-muted">Guard</span>
+        </div>
+        <div class="risk-stack">
+          <div><span>Unrealized P/L</span><b id="cockpit-upl" class="{{ 'good' if ns.upl >= 0 else 'bad' }}">${{ "{:,.2f}".format(ns.upl) }}</b></div>
+          <div><span>Max Order</span><b>${{ "{:,.0f}".format(config.MAX_ORDER_VALUE_USD|float) }}</b></div>
+          <div><span>Daily Loss Limit</span><b>{{ "%.0f"|format(config.DAILY_LOSS_LIMIT_PCT|float * 100) }}%</b></div>
+          <div><span>Signal Threshold</span><b>{{ "%.0f"|format(config.SIGNAL_MIN_CONFIDENCE|float) }}/100</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <div class="section-label">Key Metrics</div>
-{% set ns = namespace(upl=0.0) %}
-{% for p in positions %}{% set ns.upl = ns.upl + p.unrealized_pl|float %}{% endfor %}
 <section class="metrics">
   <div class="metric metric--blue">
     <span class="metric-label">Portfolio</span>
@@ -141,6 +253,7 @@
         <span class="agent-badge gemini-badge">Gemini</span>
         <span class="agent-badge grok-badge">Grok</span>
         <span class="agent-badge claude-badge">Claude 5:1</span>
+        <span class="agent-badge master-badge">Local Master</span>
       </div>
     </div>
   </div>
@@ -148,7 +261,7 @@
   <!-- Loading state -->
   <div id="ai-loading" class="ai-loading hidden">
     <div class="spinner"></div>
-    <span>Running Gemini + Grok in parallel, then Claude validates 5:1 ratio…</span>
+    <span>Gemini + Grok running in parallel → Claude validates 5:1 ratio → Local Master synthesises…</span>
   </div>
 
   <!-- Agent cards -->
@@ -220,10 +333,32 @@
     </div>
   </div>
 
+  <!-- Local LLM Master — full-width synthesiser card -->
+  <div class="agent-card agent-card--master master-card-full" id="card-master">
+    <div class="agent-card-header">
+      <div class="agent-icon master-icon">M</div>
+      <div>
+        <div class="agent-name">Local LLM Master <span class="master-local-pill">Runs Locally</span></div>
+        <div class="agent-role">NexoSignal Orchestrator · Synthesises Gemini + Grok + Claude → Final Verdict · Ollama</div>
+      </div>
+      <span class="signal-badge" id="master-signal-badge">—</span>
+    </div>
+    <div class="agent-body">
+      <div class="agent-metric-row">
+        <div class="agent-metric"><span>Confidence</span><strong id="master-conf">—</strong></div>
+        <div class="agent-metric"><span>Agreement</span><strong id="master-sentiment">—</strong></div>
+        <div class="agent-metric"><span>Take Profit</span><strong id="master-target">—</strong></div>
+        <div class="agent-metric"><span>Stop Loss</span><strong id="master-sl">—</strong></div>
+        <div class="agent-metric"><span>R:R Ratio</span><strong id="master-rr">—</strong></div>
+      </div>
+      <div class="agent-rationale master-rationale" id="master-rationale">Awaiting master synthesis…</div>
+    </div>
+  </div>
+
   <!-- Consensus + 5:1 verdict -->
   <div class="consensus-panel" id="consensus-panel">
     <div class="consensus-left">
-      <div class="consensus-label">NexoSignal Agent Consensus</div>
+      <div class="consensus-label">NexoSignal Master Decision</div>
       <div class="consensus-signal" id="consensus-signal">—</div>
       <div class="consensus-conf" id="consensus-conf">Confidence: —</div>
     </div>
@@ -246,7 +381,7 @@
       <div class="verdict-box" id="verdict-box">
         <div class="verdict-icon" id="verdict-icon">⏳</div>
         <div class="verdict-text" id="verdict-text">Awaiting Research</div>
-        <div class="verdict-sub" id="verdict-sub">Run analysis to see Claude's trade decision</div>
+        <div class="verdict-sub" id="verdict-sub">Run analysis to see the Master LLM trade decision</div>
       </div>
     </div>
   </div>
