@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Research{% endblock %}
+{% block page_title %}Research & Intelligence{% endblock %}
 
 {% block content %}
 
@@ -163,6 +164,81 @@
   <div class="level-card level-rr"><span>R:R Ratio</span><strong id="tl-rr">—</strong></div>
 </div>
 
+<!-- ════ Chart + Quick Stats ════════════════════════════════════════════════ -->
+<div id="res-chart-panel" class="res-chart-panel" style="display:none">
+  <div class="res-chart-divider">
+    <span id="res-chart-symbol-label">Price Chart</span>
+    <a id="res-export-btn" href="#" class="ns-chip chip-muted" style="text-decoration:none" title="Download CSV bars">⬇ Export CSV</a>
+  </div>
+  <div id="tv-chart-container" class="tv-chart-container"></div>
+  <div class="res-quick-stats">
+    <div class="rqs-item">
+      <span class="rqs-label">StockTwits Sentiment</span>
+      <div class="rqs-value" id="rqs-sent-badge">—</div>
+    </div>
+    <div class="rqs-item">
+      <span class="rqs-label">DCF Fair Value</span>
+      <div class="rqs-value" id="rqs-dcf-value">—</div>
+    </div>
+    <div class="rqs-item rqs-wide">
+      <span class="rqs-label">Chart Patterns</span>
+      <div class="rqs-value" id="rqs-pattern-badges">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ Lens Intelligence Feed ══════════════════════════════════════════════ -->
+<div id="lens-feed" class="lens-feed" style="display:none">
+  <div class="lens-feed-header">
+    <div class="lens-feed-title-row">
+      <div class="lens-icon">L</div>
+      <div>
+        <div class="lens-feed-title">NexoSignal Lens <span class="lens-provider-pill" id="lens-provider-pill">—</span></div>
+        <div class="lens-feed-sub">Structured AI Intelligence Report</div>
+      </div>
+      <div class="lens-conviction-block">
+        <div class="lens-conviction-label">Conviction</div>
+        <div class="lens-conviction-score" id="lens-conviction">—</div>
+      </div>
+      <span class="signal-badge" id="lens-signal-badge">—</span>
+      <div class="lens-sentiment-pill" id="lens-sentiment-pill">—</div>
+    </div>
+    <p class="lens-rationale" id="lens-rationale">Run AI Research above to generate Lens intelligence…</p>
+  </div>
+
+  <div class="lens-feed-grid">
+    <div class="lens-card lens-card-insights">
+      <div class="lens-card-head"><span class="lens-card-icon">💡</span> Key Insights</div>
+      <ul class="lens-list" id="lens-insights"></ul>
+    </div>
+    <div class="lens-card lens-card-risks">
+      <div class="lens-card-head"><span class="lens-card-icon">⚠</span> Risk Factors</div>
+      <ul class="lens-list" id="lens-risks"></ul>
+    </div>
+    <div class="lens-card lens-card-opportunities">
+      <div class="lens-card-head"><span class="lens-card-icon">🎯</span> Opportunities</div>
+      <ul class="lens-list" id="lens-opportunities"></ul>
+    </div>
+  </div>
+
+  <div class="lens-levels" id="lens-levels" style="display:none">
+    <div class="lens-level-item"><span>Lens Target</span><strong id="lens-target">—</strong></div>
+    <div class="lens-level-item"><span>Lens Stop</span><strong id="lens-stop">—</strong></div>
+  </div>
+
+  <!-- Ask AI Analyst -->
+  <div class="lens-ask-section">
+    <div class="lens-ask-head">Ask AI Analyst</div>
+    <div class="lens-ask-row">
+      <input type="text" id="lens-query-input" class="lens-query-input"
+             placeholder="e.g. What's the macro risk? Is there insider buying? Compare to sector peers…"
+             maxlength="500" onkeydown="if(event.key==='Enter')submitLensAsk()">
+      <button class="lens-ask-btn" id="lens-ask-btn" onclick="submitLensAsk()">Ask</button>
+    </div>
+    <div id="lens-ask-result" class="lens-ask-result" style="display:none"></div>
+  </div>
+</div>
+
 <!-- ════ Intelligence Section ══════════════════════════════════════════════ -->
 <div class="res-section-divider">
   <span>Intelligence Panel</span>
@@ -258,7 +334,7 @@
           </span>
           {% if ins.shares %}<span class="muted" style="font-size:11px">{{ "{:,.0f}".format(ins.shares) }} shares</span>{% endif %}
         </div>
-        <div class="muted" style="font-size:11px">{{ ins.filed_at[:10] if ins.filed_at else '' }}</div>
+        <div class="muted" style="font-size:11px">{{ (ins.filed_at|string)[:10] if ins.filed_at else '' }}</div>
       </div>
       {% else %}<div class="empty">No insider filings yet</div>{% endfor %}
     </div>
@@ -287,6 +363,70 @@
             <td>{{ e.uptime_seconds or 0 }}s</td>
           </tr>
           {% else %}<tr><td colspan="7" class="empty">No telemetry yet — start the agent</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Earnings Calendar (populated by loadEarnings()) -->
+  <div class="intel-card" id="earnings-intel-card" style="display:none">
+    <div class="intel-card-head">
+      <span class="intel-label">Earnings Calendar</span>
+      <span class="pill chip-muted">Next 30 days</span>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead><tr><th>Symbol</th><th>Date</th><th>Time</th><th>EPS Est.</th><th>Rev Est.</th></tr></thead>
+        <tbody id="earnings-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Analyst Ratings (populated by loadAnalyst()) -->
+  <div class="intel-card" id="analyst-intel-card" style="display:none">
+    <div class="intel-card-head">
+      <span class="intel-label">Analyst Ratings</span>
+      <span class="pill chip-muted" id="analyst-symbol-label">—</span>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead><tr><th>Date</th><th>Firm</th><th>Action</th><th>From</th><th>To</th></tr></thead>
+        <tbody id="analyst-tbody"><tr><td colspan="5" class="empty">Run analysis to load ratings</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Lens Intelligence History -->
+  <div class="intel-card intel-card--wide" id="lens-history-card">
+    <div class="intel-card-head">
+      <span class="intel-label">Lens Intelligence History</span>
+      <div class="lens-history-filters">
+        <input type="text" id="lh-filter-sym" class="lh-filter-input" placeholder="Symbol…" maxlength="12"
+               oninput="filterLensHistory()">
+        <select id="lh-filter-type" class="lh-filter-select" onchange="filterLensHistory()">
+          <option value="">All types</option>
+          <option value="summary">Summary</option>
+          <option value="ask">Ask</option>
+        </select>
+        <button class="ns-chip chip-muted" style="cursor:pointer;font-size:11px;padding:4px 10px"
+                onclick="loadLensHistory()">↻ Refresh</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="intel-table">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Date</th>
+            <th>Type</th>
+            <th>Signal</th>
+            <th>Conviction</th>
+            <th>Sentiment</th>
+            <th>Rationale</th>
+          </tr>
+        </thead>
+        <tbody id="lens-history-tbody">
+          <tr><td colspan="7" class="empty">Loading Lens history…</td></tr>
         </tbody>
       </table>
     </div>
@@ -326,6 +466,15 @@ async function runAIResearch() {
   const btn = document.getElementById('ai-run-btn');
   loading.classList.remove('hidden');
   btn.disabled = true;
+
+  // Show chart panel and fire supplemental data fetches immediately
+  document.getElementById('res-chart-panel').style.display = 'block';
+  loadChart(sym);
+  loadSentiment(sym);
+  loadDCF(sym);
+  loadPatterns(sym);
+  loadAnalyst(sym);
+  loadEarnings();
 
   // Reset
   ['gemini','grok','claude','master'].forEach(p => {
@@ -398,11 +547,164 @@ async function runAIResearch() {
       document.getElementById('trade-levels').classList.remove('hidden');
     }
 
+    // Fire Lens intelligence summary in background (non-blocking)
+    loadLensSummary(sym);
+
   } catch(e) {
     document.getElementById('verdict-text').textContent = '⚠ Error: ' + e.message;
   } finally {
     loading.classList.add('hidden');
     btn.disabled = false;
+  }
+}
+
+// ── TradingView Lightweight Charts ────────────────────────────────────────
+let _tvChart = null, _tvSeries = null;
+
+function _initTVChart() {
+  const container = document.getElementById('tv-chart-container');
+  if (!container || !window.LightweightCharts) return;
+  if (_tvChart) { _tvChart.remove(); _tvChart = null; _tvSeries = null; }
+  _tvChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 260,
+    layout: { background: { color: '#111820' }, textColor: '#93a4b7' },
+    grid: { vertLines: { color: '#2b3745' }, horzLines: { color: '#2b3745' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#2b3745' },
+    timeScale: { borderColor: '#2b3745', timeVisible: true },
+  });
+  _tvSeries = _tvChart.addCandlestickSeries({
+    upColor: '#00c98d', downColor: '#ff4d5e',
+    borderUpColor: '#00c98d', borderDownColor: '#ff4d5e',
+    wickUpColor: '#00c98d', wickDownColor: '#ff4d5e',
+  });
+}
+
+async function loadChart(sym) {
+  if (!window.LightweightCharts) return;
+  _initTVChart();
+  document.getElementById('res-chart-symbol-label').textContent = sym + ' · Daily Chart';
+  const exportBtn = document.getElementById('res-export-btn');
+  if (exportBtn) exportBtn.href = `/api/export/bars/${encodeURIComponent(sym)}?timeframe=1Day&limit=365`;
+  try {
+    const res = await fetch(`/api/nexosignal/history/${encodeURIComponent(sym)}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    const bars = (d.bars || []).map(b => ({
+      time: Math.floor(new Date(b.t).getTime() / 1000),
+      open: +b.o, high: +b.h, low: +b.l, close: +b.c,
+    })).filter(b => b.time > 0).sort((a, b) => a.time - b.time);
+    if (_tvSeries && bars.length) {
+      _tvSeries.setData(bars);
+      _tvChart && _tvChart.timeScale().fitContent();
+    }
+  } catch(e) { console.warn('loadChart error', e); }
+}
+
+async function loadSentiment(sym) {
+  const el = document.getElementById('rqs-sent-badge');
+  if (!el) return;
+  el.textContent = '…';
+  try {
+    const r = await fetch(`/api/research/sentiment/${encodeURIComponent(sym)}`);
+    const d = await r.json();
+    if (d.status === 'ok') {
+      const pct = d.bull_pct || 0;
+      const color = pct >= 55 ? 'var(--good)' : pct <= 40 ? 'var(--bad)' : 'var(--warn)';
+      el.innerHTML = `<span style="color:${color};font-weight:700">${pct}% Bull</span> <span style="color:var(--muted);font-size:11px">(${d.total} msgs)</span>`;
+    } else {
+      el.textContent = d.status === 'rate_limited' ? 'Rate limited' : '—';
+    }
+  } catch(e) { el.textContent = '—'; }
+}
+
+async function loadDCF(sym) {
+  const el = document.getElementById('rqs-dcf-value');
+  if (!el) return;
+  el.textContent = '…';
+  try {
+    const r = await fetch(`/api/research/dcf/${encodeURIComponent(sym)}`);
+    const d = await r.json();
+    if (d.status === 'ok' && d.dcf_value) {
+      const color = d.fair_value_label === 'undervalued' ? 'var(--good)' :
+                    d.fair_value_label === 'overvalued'  ? 'var(--bad)' : 'var(--muted)';
+      const up = d.upside_pct != null ? ` (${d.upside_pct > 0 ? '+' : ''}${d.upside_pct}%)` : '';
+      el.innerHTML = `$${d.dcf_value.toFixed(2)}<span style="color:${color};margin-left:6px;font-size:11px">${d.fair_value_label}${up}</span>`;
+    } else {
+      el.textContent = '—';
+    }
+  } catch(e) { el.textContent = '—'; }
+}
+
+async function loadPatterns(sym) {
+  const el = document.getElementById('rqs-pattern-badges');
+  if (!el) return;
+  el.textContent = '…';
+  try {
+    const r = await fetch(`/api/research/patterns/${encodeURIComponent(sym)}`);
+    if (r.status === 503) { el.textContent = 'pandas-ta not installed'; return; }
+    const d = await r.json();
+    if (!d.patterns || !d.patterns.length) { el.textContent = 'No patterns detected'; return; }
+    el.innerHTML = d.patterns.slice(0, 6).map(p => {
+      const cls = p.signal === 'bullish' ? 'chip-good' : 'chip-bad';
+      return `<span class="ns-chip ${cls}" style="font-size:10px;margin:2px 1px">${p.pattern}</span>`;
+    }).join('');
+  } catch(e) { el.textContent = '—'; }
+}
+
+async function loadAnalyst(sym) {
+  const card = document.getElementById('analyst-intel-card');
+  const tbody = document.getElementById('analyst-tbody');
+  const label = document.getElementById('analyst-symbol-label');
+  if (!card || !tbody) return;
+  card.style.display = 'block';
+  if (label) label.textContent = sym;
+  tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading…</td></tr>';
+  try {
+    const r = await fetch(`/api/research/analyst/${encodeURIComponent(sym)}`);
+    const d = await r.json();
+    if (!d.ratings || !d.ratings.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${d.reason || 'No analyst data'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = d.ratings.map(a => {
+      const act = (a.action || '').toLowerCase();
+      const cls = act.includes('upgrade') ? 'good' : act.includes('downgrade') ? 'bad' : '';
+      return `<tr>
+        <td>${a.published_date || '—'}</td>
+        <td>${a.firm || '—'}</td>
+        <td class="${cls}"><strong>${a.action || '—'}</strong></td>
+        <td>${a.from_grade || '—'}</td>
+        <td>${a.to_grade || '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Error loading analyst data</td></tr>';
+  }
+}
+
+async function loadEarnings() {
+  const card = document.getElementById('earnings-intel-card');
+  const tbody = document.getElementById('earnings-tbody');
+  if (!card || !tbody) return;
+  card.style.display = 'block';
+  try {
+    const r = await fetch('/api/research/earnings');
+    const d = await r.json();
+    if (!d.earnings || !d.earnings.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${d.reason || 'No upcoming earnings in watchlist'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = d.earnings.map(e => `<tr>
+      <td><strong>${e.symbol}</strong></td>
+      <td>${e.date || '—'}</td>
+      <td>${e.time || '—'}</td>
+      <td>${e.eps_estimate != null ? e.eps_estimate.toFixed(2) : '—'}</td>
+      <td>${e.revenue_estimate != null ? '$' + (e.revenue_estimate / 1e6).toFixed(0) + 'M' : '—'}</td>
+    </tr>`).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Error loading earnings</td></tr>';
   }
 }
 
@@ -417,5 +719,207 @@ if (urlSym) {
   document.getElementById('ai-symbol-input').value = urlSym;
   runAIResearch();
 }
+
+// ── Lens Intelligence Feed ──────────────────────────────────────────────────
+
+let _lensCurrentSym = '';
+let _lensAllReports = [];
+
+function _sentimentClass(sent) {
+  if (!sent) return 'chip-muted';
+  const s = sent.toLowerCase();
+  if (s === 'bullish' || s === 'positive') return 'chip-good';
+  if (s === 'bearish' || s === 'negative') return 'chip-bad';
+  return 'chip-muted';
+}
+
+function _sigClass(sig) {
+  if (!sig) return '';
+  return sig === 'buy' ? ' buy' : sig === 'sell' ? ' sell' : sig === 'hold' ? ' hold' : '';
+}
+
+function populateLensFeed(data, sym) {
+  if (!data) return;
+  _lensCurrentSym = sym || _lensCurrentSym;
+  document.getElementById('lens-feed').style.display = 'block';
+
+  // Provider pill
+  const pill = document.getElementById('lens-provider-pill');
+  if (pill) {
+    pill.textContent = data.provider || '—';
+    pill.className = 'lens-provider-pill' + (data.cached ? ' lens-cached' : '');
+  }
+
+  // Signal badge
+  const sb = document.getElementById('lens-signal-badge');
+  if (sb) {
+    sb.textContent = (data.signal || '—').toUpperCase();
+    sb.className = 'signal-badge' + _sigClass(data.signal);
+  }
+
+  // Sentiment pill
+  const sp = document.getElementById('lens-sentiment-pill');
+  if (sp) {
+    sp.textContent = data.news_sentiment || '—';
+    sp.className = 'lens-sentiment-pill ' + _sentimentClass(data.news_sentiment);
+  }
+
+  // Conviction score
+  const cv = document.getElementById('lens-conviction');
+  if (cv) {
+    const score = data.conviction_score ?? 0;
+    cv.textContent = score + '/100';
+    cv.className = 'lens-conviction-score ' + (score >= 70 ? 'cv-high' : score >= 40 ? 'cv-mid' : 'cv-low');
+  }
+
+  // Rationale
+  const rat = document.getElementById('lens-rationale');
+  if (rat) rat.textContent = data.rationale || '—';
+
+  // Lists
+  const renderList = (id, items) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!items || !items.length) { el.innerHTML = '<li class="lens-li-empty">—</li>'; return; }
+    el.innerHTML = items.map(i => `<li class="lens-li">${i}</li>`).join('');
+  };
+  renderList('lens-insights', data.key_insights);
+  renderList('lens-risks', data.risks);
+  renderList('lens-opportunities', data.opportunities);
+
+  // Trade levels
+  const lvl = document.getElementById('lens-levels');
+  if (data.price_target || data.stop_loss) {
+    document.getElementById('lens-target').textContent = data.price_target ? '$' + Number(data.price_target).toFixed(2) : '—';
+    document.getElementById('lens-stop').textContent   = data.stop_loss    ? '$' + Number(data.stop_loss).toFixed(2)    : '—';
+    if (lvl) lvl.style.display = 'flex';
+  } else {
+    if (lvl) lvl.style.display = 'none';
+  }
+}
+
+async function loadLensSummary(sym) {
+  if (!sym) return;
+  _lensCurrentSym = sym;
+  try {
+    const r = await fetch(`/api/lens/summary/${encodeURIComponent(sym)}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    populateLensFeed(data, sym);
+  } catch(e) {
+    console.warn('Lens summary failed', e);
+  }
+}
+
+async function submitLensAsk() {
+  const sym = _lensCurrentSym || document.getElementById('ai-symbol-input')?.value?.trim()?.toUpperCase();
+  const query = document.getElementById('lens-query-input')?.value?.trim();
+  const btn = document.getElementById('lens-ask-btn');
+  const result = document.getElementById('lens-ask-result');
+  if (!sym || !query) { alert('Enter a symbol and question first.'); return; }
+
+  btn.disabled = true;
+  btn.textContent = '…';
+  if (result) { result.style.display = 'none'; result.innerHTML = ''; }
+
+  try {
+    const r = await fetch('/api/lens/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ symbol: sym, query }),
+    });
+    const data = await r.json();
+    if (result) {
+      const sentCls = _sentimentClass(data.news_sentiment);
+      result.style.display = 'block';
+      result.innerHTML = `
+        <div class="lens-ask-answer-head">
+          <strong>${sym}</strong>
+          <span class="lens-sentiment-pill ${sentCls}">${data.news_sentiment || '—'}</span>
+          <span class="signal-badge${_sigClass(data.signal)}">${(data.signal||'—').toUpperCase()}</span>
+          <span class="lens-conviction-score ${(data.conviction_score||0) >= 70 ? 'cv-high' : 'cv-mid'}">${data.conviction_score ?? '—'}/100</span>
+        </div>
+        <p class="lens-ask-rationale">${data.rationale || 'No response.'}</p>
+        ${(data.key_insights||[]).length ? '<div class="lens-ask-insights"><strong>Insights:</strong> ' + data.key_insights.join(' · ') + '</div>' : ''}
+      `;
+      // Also refresh main feed
+      populateLensFeed(data, sym);
+      // Refresh history
+      loadLensHistory();
+    }
+  } catch(e) {
+    if (result) { result.style.display = 'block'; result.textContent = 'Error: ' + e.message; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Ask';
+  }
+}
+
+// ── Lens History Table ──────────────────────────────────────────────────────
+
+async function loadLensHistory() {
+  const tbody = document.getElementById('lens-history-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7" class="empty">Loading…</td></tr>';
+  try {
+    const sym = document.getElementById('lh-filter-sym')?.value?.trim()?.toUpperCase() || '';
+    const type = document.getElementById('lh-filter-type')?.value || '';
+    let url = '/api/lens/history?limit=50';
+    if (sym)  url += '&symbol=' + encodeURIComponent(sym);
+    if (type) url += '&type='   + encodeURIComponent(type);
+    const r = await fetch(url);
+    const d = await r.json();
+    _lensAllReports = d.reports || [];
+    renderLensHistory(_lensAllReports);
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Error loading history</td></tr>';
+  }
+}
+
+function renderLensHistory(reports) {
+  const tbody = document.getElementById('lens-history-tbody');
+  if (!tbody) return;
+  if (!reports.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No Lens reports yet — run AI Research for any symbol</td></tr>';
+    return;
+  }
+  tbody.innerHTML = reports.map(rep => {
+    const c = rep.content_json || {};
+    const sig = c.signal || '—';
+    const sigCls = sig === 'buy' ? 'good' : sig === 'sell' ? 'bad' : '';
+    const sent = c.news_sentiment || '—';
+    const sentCls = _sentimentClass(sent).replace('chip-', '');
+    const date = (rep.created_at || '').slice(0, 16).replace('T', ' ');
+    const rationale = (c.rationale || '').slice(0, 80) + (c.rationale && c.rationale.length > 80 ? '…' : '');
+    const typePill = rep.report_type === 'ask' ? '<span class="lens-ask-pill">Ask</span>' : '';
+    return `<tr>
+      <td>
+        <strong class="mkt-sym-link" onclick="document.getElementById('ai-symbol-input').value='${rep.symbol}';window.scrollTo(0,0);runAIResearch()">
+          ${rep.symbol}
+        </strong>
+      </td>
+      <td class="muted">${date}</td>
+      <td>${typePill || '<span class="lens-sum-pill">Summary</span>'}</td>
+      <td class="${sigCls}"><strong>${sig.toUpperCase()}</strong></td>
+      <td>${c.conviction_score ?? '—'}</td>
+      <td><span class="${sentCls}">${sent}</span></td>
+      <td class="muted" style="max-width:260px">${rationale || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterLensHistory() {
+  const sym  = (document.getElementById('lh-filter-sym')?.value || '').trim().toUpperCase();
+  const type = document.getElementById('lh-filter-type')?.value || '';
+  const filtered = _lensAllReports.filter(r => {
+    return (!sym  || r.symbol === sym)
+        && (!type || r.report_type === type);
+  });
+  renderLensHistory(filtered);
+}
+
+
+// Load Lens history on page load
+loadLensHistory();
 </script>
 {% endblock %}

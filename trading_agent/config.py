@@ -7,6 +7,10 @@ load_dotenv(override=True)
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 TRADING_MODE      = os.getenv("TRADING_MODE", "paper").lower()  # "paper" or "live"
+LIVE_TRADING      = os.getenv("LIVE_TRADING", "false").lower() in {"true", "1", "yes"}
+AUTONOMOUS_TRADING = os.getenv("AUTONOMOUS_TRADING", "false").lower() in {"true", "1", "yes"}
+REQUIRE_MANUAL_APPROVAL = os.getenv("REQUIRE_MANUAL_APPROVAL", "true").lower() not in {"false", "0", "no"}
+ALPACA_PAPER = os.getenv("ALPACA_PAPER", "true").lower() not in {"false", "0", "no"}
 
 # Base URLs
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
@@ -22,6 +26,9 @@ MIN_CASH_RESERVE_USD   = float(os.getenv("MIN_CASH_RESERVE_USD", "500"))
 POSITION_SIZE_PCT      = float(os.getenv("POSITION_SIZE_PCT", "0.10"))
 MAX_DAILY_LOSS_LIMIT   = float(os.getenv("MAX_DAILY_LOSS_LIMIT", "500"))
 MAX_POSITION_SIZE      = float(os.getenv("MAX_POSITION_SIZE", "5000"))
+MIN_RISK_REWARD_RATIO  = float(os.getenv("MIN_RISK_REWARD_RATIO", "5.0"))
+MAX_DATA_STALENESS_SECONDS = int(os.getenv("MAX_DATA_STALENESS_SECONDS", "900"))
+MAX_GUARD_STRIKES      = int(os.getenv("MAX_GUARD_STRIKES", "2"))
 
 _whitelist_raw = os.getenv("SYMBOL_WHITELIST", "")
 _blacklist_raw = os.getenv("SYMBOL_BLACKLIST", "")

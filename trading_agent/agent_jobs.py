@@ -178,7 +178,8 @@ class NexoSignalJobsMixin:
 
     def trip_circuit_breaker(self, reason: str) -> None:
         self.circuit_breaker_active = True
-        self.broker.cancel_all_orders()
+        if not self.dry_run:
+            self.broker.cancel_all_orders()
         self._log(
             f"NexoSignal Guard circuit breaker tripped: {reason}",
             "error",

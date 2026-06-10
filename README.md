@@ -116,18 +116,34 @@ DASHBOARD_USERS={"admin":"secret123","trader":"pass456"}
 
 ## 7. Use The Dashboard
 
-The dashboard shows:
+### Sidebar navigation
 
-- Portfolio, cash, buying power, positions, and open orders
-- Manual order form with dry-run support
-- Bot start/stop controls
-- AlphaCore signal analytics
-- NexoSignal Intelligence Panel
-- Trade Ledger events
-- Signal events
-- Telemetry events
-- MetaMask public wallet capture
-- Brokerage connection records
+The sidebar gives one-click access to:
+
+| Page | Route | Description |
+|---|---|---|
+| Portfolio | `/` | Account, positions, open orders, trade ledger |
+| Markets | `/markets` | US equities, Asian indices, crypto, screeners |
+| Charts | `/chart/<symbol>` | TradingView candlestick + indicator + signal overlay |
+| Signals | `/portfolio#signals` | AlphaCore signal feed |
+| Research | `/research` | Multi-agent AI research (Gemini/Grok/Claude/Local LLM) |
+| Trade | `/trade` | Manual orders, bot start/stop, dry-run mode |
+
+Collapse the sidebar with the `«` toggle. On mobile, tap the hamburger (☰) to open it as an overlay.
+
+### Interactive charts
+
+Navigate to `/chart/AAPL` (or any symbol) for:
+
+- **Candlestick + volume** histogram at 5m / 15m / 1H / 1D / 1W
+- **Indicator overlays**: SMA 20, SMA 50, EMA 9 (toggleable)
+- **RSI 14** sub-chart synchronized with the main time scale
+- **AlphaCore signal** pill (BUY / SELL / HOLD + confidence %)
+- **Auto-refresh** — latest bar updates every 60 s without re-rendering
+- **Signal history** table for the selected symbol
+- Press `/` to focus the symbol search box; Enter navigates to the new chart
+
+### Starting the bot
 
 For first-time testing:
 
@@ -142,7 +158,57 @@ For first-time testing:
 python scripts/dry_run_report.py
 ```
 
-This summarizes recent signal approvals, trade captures, confidence, and dry-run activity.
+This summarizes recent signal approvals, trade captures, confidence, Top 3 predictions, Top 5 Alpha Picks, 5:1 risk-reward levels, and dry-run activity.
+
+## 8.1 Dashboard Intelligence APIs
+
+All API routes require a valid session cookie (login first). All write routes are POST/PATCH only.
+
+**Core signals & positions**
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/health` | Service health + mode |
+| GET | `/api/nexosignal/status` | Agent status + safety config |
+| GET | `/api/nexosignal/telemetry` | Full telemetry snapshot |
+| GET | `/api/nexosignal/top-predictions` | Top 3 AlphaCore predictions |
+| GET | `/api/nexosignal/alpha-picks` | Top 5 alpha picks |
+| GET | `/api/nexosignal/risk-reward/<sym>` | Risk/reward analysis for symbol |
+| GET | `/api/nexosignal/history/<sym>` | OHLCV + indicators (dashboard use) |
+| GET | `/api/nexosignal/strategy-performance` | Per-strategy trade statistics |
+| GET | `/api/nexosignal/positions` | Live Alpaca positions |
+| GET | `/api/nexosignal/pnl` | P&L snapshot |
+| POST | `/api/nexosignal/alerts/test` | Send test Telegram alert |
+
+**Chart page APIs**
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/api/chart/<sym>/ohlcv` | OHLCV + SMA20/50/EMA9/RSI14 overlays; `?timeframe=1Day&limit=200`; cached 30–300 s by timeframe |
+| GET | `/api/chart/<sym>/signals` | Signal history filtered to one symbol |
+
+**Market data & research**
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/ticker-strip` | 14-symbol price ticker (cached 30 s) |
+| GET | `/api/market-data` | US/Asia/crypto tables; `?region=us&screen=active` |
+| GET | `/api/research/earnings` | FMP earnings calendar |
+| GET | `/api/research/sentiment/<sym>` | StockTwits bull/bear sentiment |
+| GET | `/api/research/dcf/<sym>` | FMP DCF fair value |
+| GET | `/api/research/analyst/<sym>` | FMP analyst upgrades/downgrades |
+| GET | `/api/research/patterns/<sym>` | Candlestick patterns (requires pandas-ta) |
+| GET | `/api/research/sector-allocation` | Portfolio sector breakdown |
+| GET | `/api/ai-research/<sym>` | Multi-agent AI research (requires keys) |
+| GET | `/api/export/bars/<sym>` | CSV OHLCV download |
+
+**Webhooks**
+
+| Method | Route | Description |
+|---|---|---|
+| POST | `/webhooks/tradingview` | Receive TradingView alerts; optional `TRADINGVIEW_WEBHOOK_SECRET` |
+
+Top predictions are probabilistic rankings, not guaranteed outcomes. AI/ML research can inform ranking, but it must not bypass AlphaCore, Guard, or risk checks.
 
 ## 9. Optional Telegram Alerts
 
@@ -197,6 +263,9 @@ Important: Vercel serverless functions should not run the continuous trading loo
 - Start with Alpaca paper trading.
 - Keep dry-run enabled until results are reviewed.
 - NexoSignal does not guarantee profitable trades.
+- Live autonomous orders are disabled by default with `LIVE_TRADING=false`, `AUTONOMOUS_TRADING=false`, `REQUIRE_MANUAL_APPROVAL=true`, and `ALPACA_PAPER=true`.
+- Autonomous candidates must pass confluence, ATR, liquidity, fresh-data, buying-power, circuit-breaker, and 5:1 risk-reward checks.
+- The app has no withdrawal, transfer, ACH, wire, card, bridge, or external fund movement logic.
 - Crypto bracket execution is intentionally blocked in the safe initial rollout until Alpaca crypto order behavior is validated in paper mode.
 - Never commit `.env` or API keys.
 
@@ -207,7 +276,7 @@ Important: Vercel serverless functions should not run the continuous trading loo
 python dashboard.py
 
 # Compile-check Python files
-python -m py_compile dashboard.py main.py trading_agent\agent.py trading_agent\broker.py trading_agent\config.py trading_agent\signal_engine.py trading_agent\storage.py trading_agent\strategy.py
+python -m py_compile dashboard.py main.py trading_agent\agent.py trading_agent\broker.py trading_agent\config.py trading_agent\restrictions.py trading_agent\signal_engine.py trading_agent\storage.py trading_agent\strategy.py
 
 # Generate dry-run report
 python scripts\dry_run_report.py

@@ -883,6 +883,136 @@ def analyze_annual_report(
         return {"lens_summary": f"Analysis error: {str(exc)[:80]}", "moat_score": 50.0, "red_flag_count": 0}
 
 
+def generate_lens_summary(
+    symbol: str,
+    price: float,
+    bars: list[dict],
+    indicators: Optional[dict] = None,
+    query: Optional[str] = None,
+) -> dict:
+    """
+    NexoSignal Lens — structured AI intelligence summary.
+
+    Returns a dict with key_insights, risks, opportunities, conviction_score,
+    news_sentiment, signal, price_target, stop_loss, rationale, provider.
+
+    Pipeline: Claude Haiku → Gemini fallback → keyword heuristic fallback.
+    The AI layer is advisory only — does not bypass AlphaCore or Guard validation.
+    """
+    atr = _compute_atr(bars)
+    closes = [float(b["c"]) for b in bars[-20:]] if bars else []
+    pct_chg = ((closes[-1] - closes[0]) / closes[0] * 100) if len(closes) >= 2 else 0.0
+    vols = [float(b.get("v", 0)) for b in bars[-5:]] if bars else []
+    avg_vol = sum(vols) / len(vols) if vols else 0
+    ind_str = ""
+    if indicators:
+        ind_str = (
+            f"RSI: {indicators.get('rsi', 'N/A')} | "
+            f"Trend: {indicators.get('trend', 'N/A')} | "
+            f"VWAP: {indicators.get('vwap', 'N/A')} | "
+            f"Vol ratio: {indicators.get('volume_ratio', 'N/A')}"
+        )
+
+    base_prompt = (
+        f"Symbol: {symbol} | Price: ${price:.4f} | ATR(14): {atr:.4f}\n"
+        f"20-bar price change: {pct_chg:+.2f}% | Avg 5-bar volume: {avg_vol:,.0f}\n"
+        f"Technical indicators: {ind_str or 'N/A'}\n"
+        + (f"User research query: {query}\n" if query else "")
+        + "\nGenerate a concise structured intelligence report.\n"
+        'Return ONLY valid JSON with exactly these keys:\n'
+        '  "key_insights": [2-3 concise insight strings],\n'
+        '  "risks": [2-3 specific risk factors],\n'
+        '  "opportunities": [2-3 actionable opportunities],\n'
+        '  "conviction_score": integer 0-100,\n'
+        '  "news_sentiment": "bullish" | "bearish" | "neutral",\n'
+        '  "sentiment_score": float 0.0-1.0,\n'
+        '  "signal": "buy" | "sell" | "hold",\n'
+        '  "price_target": float or null,\n'
+        '  "stop_loss": float or null,\n'
+        '  "rationale": "2-3 sentence summary"'
+    )
+
+    def _parse_lens(text: str) -> dict:
+        data = _parse_json_response(text)
+        return {
+            "key_insights":    list(data.get("key_insights", []))[:3],
+            "risks":           list(data.get("risks", []))[:3],
+            "opportunities":   list(data.get("opportunities", []))[:3],
+            "conviction_score": int(data.get("conviction_score", 50)),
+            "news_sentiment":  str(data.get("news_sentiment", "neutral")),
+            "sentiment_score": float(data.get("sentiment_score", 0.5)),
+            "signal":          _safe_signal(data.get("signal", "hold")),
+            "price_target":    data.get("price_target"),
+            "stop_loss":       data.get("stop_loss"),
+            "rationale":       str(data.get("rationale", "")),
+            "cached":          False,
+            "error":           None,
+        }
+
+    def _fallback() -> dict:
+        sent = score_sentiment(f"{symbol} price {pct_chg:+.1f}%")
+        return {
+            "key_insights": [
+                f"Price moved {pct_chg:+.2f}% over 20 bars",
+                f"ATR(14): {atr:.4f} — {'elevated' if price > 0 and atr > price * 0.02 else 'moderate'} volatility",
+            ],
+            "risks": ["Configure API keys for full AI intelligence", "Market uncertainty remains"],
+            "opportunities": ["Full agent pipeline available via AI Research page"],
+            "conviction_score": 20,
+            "news_sentiment": sent["label"],
+            "sentiment_score": sent["score"],
+            "signal": "hold",
+            "price_target": None,
+            "stop_loss": None,
+            "rationale": (
+                f"{symbol} is showing {pct_chg:+.2f}% price change. "
+                "Enable Claude, Gemini, or Grok API keys for structured intelligence."
+            ),
+            "provider": "fallback",
+            "cached": False,
+            "error": None,
+        }
+
+    # Try Claude Haiku — fast and cheap
+    if config.ANTHROPIC_API_KEY:
+        try:
+            import anthropic as anthropic_sdk  # type: ignore
+            client = anthropic_sdk.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=700,
+                system=(
+                    "You are NexoSignal Lens, an AI trading intelligence analyst. "
+                    "Respond ONLY with valid JSON — no prose, no markdown fences."
+                ),
+                messages=[{"role": "user", "content": base_prompt}],
+            )
+            text = msg.content[0].text if msg.content else "{}"
+            result = _parse_lens(text)
+            result["provider"] = "claude"
+            return result
+        except Exception as exc:
+            logger.warning("Lens summary (Claude) failed for %s: %s", symbol, exc)
+
+    # Fallback to Gemini
+    if config.GEMINI_API_KEY:
+        try:
+            import google.generativeai as genai  # type: ignore
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            model = genai.GenerativeModel(
+                "gemini-1.5-flash",
+                system_instruction="You are NexoSignal Lens. Respond ONLY with valid JSON.",
+            )
+            resp = model.generate_content(base_prompt)
+            result = _parse_lens(resp.text)
+            result["provider"] = "gemini"
+            return result
+        except Exception as exc:
+            logger.warning("Lens summary (Gemini) failed for %s: %s", symbol, exc)
+
+    return _fallback()
+
+
 def score_sentiment(text: str) -> dict:
     """
     NexoSignal Lens — FinBERT sentiment scoring with keyword fallback.

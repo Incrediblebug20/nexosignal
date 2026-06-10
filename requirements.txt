@@ -19,6 +19,10 @@ xgboost==2.1.2
 google-generativeai>=0.7.0
 openai>=1.30.0
 anthropic>=0.28.0
+# Chart pattern detection (optional — pandas-ta)
+pandas-ta>=0.3.14b0
+# Backtesting Engine — historical market data
+yfinance>=0.2.40
 # FinBERT sentiment (optional — requires ~500 MB download on first use)
 # transformers>=4.40.0
 # torch>=2.2.0

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}System Health{% endblock %}
+{% block page_title %}System Health{% endblock %}
+
+{% block content %}
+<div class="pf-header">
+  <div>
+    <h1 class="pf-title">System Health</h1>
+    <p class="pf-sub">Runtime status, safety flags, storage, and integrations.</p>
+  </div>
+  <div class="pf-header-badges">
+    <span class="ns-chip chip-good">Dashboard Online</span>
+    <span class="ns-chip {% if status.mode == 'live' %}chip-bad{% else %}chip-good{% endif %}">
+      {{ status.mode|upper }}
+    </span>
+  </div>
+</div>
+
+<div class="pf-strip">
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Service</span>
+    <strong class="pf-strip-val">{{ status.service }}</strong>
+    <span class="pf-strip-sub">Flask dashboard</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Trading Mode</span>
+    <strong class="pf-strip-val">{{ status.mode|upper }}</strong>
+    <span class="pf-strip-sub">Paper-first default</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Supabase</span>
+    <strong class="pf-strip-val {{ 'good' if status.storage_enabled else 'bad' }}">
+      {{ "ON" if status.storage_enabled else "OFF" }}
+    </strong>
+    <span class="pf-strip-sub">Postgres ledger</span>
+  </div>
+  <div class="pf-strip-card">
+    <span class="pf-strip-label">Circuit Breaker</span>
+    <strong class="pf-strip-val {{ 'bad' if status.circuit_breaker_active else 'good' }}">
+      {{ "ACTIVE" if status.circuit_breaker_active else "CLEAR" }}
+    </strong>
+    <span class="pf-strip-sub">{{ status.guard_strikes }} guard strikes</span>
+  </div>
+</div>
+
+<div class="ns-intel-grid">
+  <section class="pf-card">
+    <div class="pf-card-head">
+      <h2>Execution Safety</h2>
+      <span class="ns-chip chip-good">Guarded</span>
+    </div>
+    <div class="risk-stack ns-risk-grid">
+      <div><span>Paper Default</span><b class="{{ 'good' if status.paper_default else 'bad' }}">{{ status.paper_default }}</b></div>
+      <div><span>Live Trading</span><b class="{{ 'bad' if status.live_trading_enabled else 'good' }}">{{ status.live_trading_enabled }}</b></div>
+      <div><span>Autonomous</span><b class="{{ 'bad' if status.autonomous_trading_enabled else 'good' }}">{{ status.autonomous_trading_enabled }}</b></div>
+      <div><span>Manual Approval</span><b class="{{ 'good' if status.manual_approval_required else 'bad' }}">{{ status.manual_approval_required }}</b></div>
+    </div>
+  </section>
+
+  <section class="pf-card">
+    <div class="pf-card-head">
+      <h2>Integrations</h2>
+      <span class="ns-chip chip-muted">Optional</span>
+    </div>
+    <div class="risk-stack ns-risk-grid">
+      <div><span>Telegram</span><b class="{{ 'good' if status.telegram_enabled else 'bad' }}">{{ "ON" if status.telegram_enabled else "OFF" }}</b></div>
+      <div><span>Local LLM</span><b class="{{ 'good' if status.local_llm_enabled else 'bad' }}">{{ "ON" if status.local_llm_enabled else "OFF" }}</b></div>
+      <div><span>Market Data</span><b>{{ config.MARKET_DATA_PROVIDER }}</b></div>
+      <div><span>Database</span><b>{{ config.DATABASE_LABEL }}</b></div>
+    </div>
+  </section>
+</div>
+
+<section class="pf-card">
+  <div class="pf-card-head">
+    <h2>Machine Health Endpoint</h2>
+    <a class="ns-btn-ghost" href="{{ url_for('health') }}" target="_blank" rel="noopener">Open JSON</a>
+  </div>
+  <pre class="health-json">{{ status | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

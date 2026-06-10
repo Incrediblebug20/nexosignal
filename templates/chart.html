@@ -1,0 +1,681 @@
+{% extends "base.html" %}
+{% block title %}{{ symbol }} Chart — NexoSignal{% endblock %}
+{% block page_title %}
+  <span class="chart-refresh-dot" id="refresh-dot" style="display:none" title="Live auto-refresh active"></span>
+  {{ symbol }} Chart
+{% endblock %}
+
+{% block content %}
+<div class="chart-page-wrap" role="main">
+
+  <!-- ════ Chart header ════════════════════════════════════════════════════ -->
+  <div class="chart-header">
+
+    <!-- Symbol search -->
+    <div class="chart-sym-search" role="search" aria-label="Symbol search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input id="chart-sym-input" type="text" value="{{ symbol }}"
+             placeholder="AAPL" autocomplete="off" autocorrect="off" spellcheck="false"
+             aria-label="Enter symbol and press Enter to load chart"
+             title="Type a symbol and press Enter"
+             onkeydown="handleSymInput(event)"
+             style="text-transform:uppercase">
+    </div>
+
+    <!-- Live price + change -->
+    <div class="chart-price-group" aria-live="polite" aria-label="Current price">
+      <span class="chart-cur-price" id="chart-price" aria-label="Price">—</span>
+      <span class="chart-chg-badge" id="chart-chg">—</span>
+    </div>
+
+    <!-- Timeframe picker -->
+    <div class="chart-tf-group" id="chart-tf-group" role="group" aria-label="Chart timeframe">
+      <button class="chart-tf-btn" data-tf="5Min"  onclick="setTf(this)" aria-label="5 minute bars">5m</button>
+      <button class="chart-tf-btn" data-tf="15Min" onclick="setTf(this)" aria-label="15 minute bars">15m</button>
+      <button class="chart-tf-btn" data-tf="1Hour" onclick="setTf(this)" aria-label="1 hour bars">1H</button>
+      <button class="chart-tf-btn active" data-tf="1Day" onclick="setTf(this)" aria-label="Daily bars" aria-pressed="true">1D</button>
+      <button class="chart-tf-btn" data-tf="1Week" onclick="setTf(this)" aria-label="Weekly bars">1W</button>
+    </div>
+
+    <!-- Indicator toggles -->
+    <div class="chart-ind-group" role="group" aria-label="Toggle indicators">
+      <button class="chart-ind-btn active" data-ind="sma20" onclick="toggleInd(this)" aria-pressed="true"  aria-label="Toggle SMA 20">SMA 20</button>
+      <button class="chart-ind-btn active" data-ind="sma50" onclick="toggleInd(this)" aria-pressed="true"  aria-label="Toggle SMA 50">SMA 50</button>
+      <button class="chart-ind-btn"        data-ind="ema9"  onclick="toggleInd(this)" aria-pressed="false" aria-label="Toggle EMA 9">EMA 9</button>
+      <button class="chart-ind-btn active" data-ind="rsi"   onclick="toggleInd(this)" aria-pressed="true"  aria-label="Toggle RSI 14">RSI</button>
+      <button class="chart-ind-btn"        data-ind="vol"   onclick="toggleInd(this)" aria-pressed="false" aria-label="Toggle Volume">Vol</button>
+    </div>
+
+  </div>
+
+  <!-- ════ Chart body: main chart + side panel ═════════════════════════════ -->
+  <div class="chart-body">
+
+    <!-- Left: candlestick + RSI -->
+    <div class="chart-col">
+
+      <div class="chart-canvas-wrap" id="chart-canvas-wrap" aria-label="{{ symbol }} price chart">
+        <div id="chart-container" role="img" aria-label="{{ symbol }} candlestick chart"></div>
+
+        <!-- Loading overlay -->
+        <div class="chart-loading" id="chart-loading" aria-live="polite">
+          <div class="spinner" role="progressbar" aria-label="Loading chart data"></div>
+          <span>Loading chart data…</span>
+        </div>
+
+        <!-- Stale data warning -->
+        <div class="chart-stale-badge" id="chart-stale" role="status">⚠ Simulated data</div>
+
+        <!-- Crosshair OHLCV tooltip -->
+        <div class="chart-crosshair-tooltip" id="chart-tooltip" aria-hidden="true">
+          <div class="chart-tt-row">
+            <span class="chart-tt-key">O</span><span class="chart-tt-val" id="tt-o">—</span>
+            <span class="chart-tt-key">H</span><span class="chart-tt-val" id="tt-h">—</span>
+            <span class="chart-tt-key">L</span><span class="chart-tt-val" id="tt-l">—</span>
+            <span class="chart-tt-key">C</span><span class="chart-tt-val" id="tt-c">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-rsi-wrap" id="chart-rsi-wrap" aria-label="RSI 14 sub-chart">
+        <span class="chart-sublabel">RSI 14</span>
+        <div id="rsi-container" role="img" aria-label="RSI 14 indicator"></div>
+      </div>
+
+    </div>
+
+    <!-- Right: stats panel -->
+    <aside class="chart-side-panel" aria-label="{{ symbol }} statistics and trading">
+
+      <div class="chart-stat-section">
+        <div class="chart-stat-head">{{ symbol }}</div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">Open</span>
+          <span class="chart-stat-v" id="stat-open">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">High</span>
+          <span class="chart-stat-v good" id="stat-high">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">Low</span>
+          <span class="chart-stat-v bad" id="stat-low">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">Close</span>
+          <span class="chart-stat-v" id="stat-close">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">Volume</span>
+          <span class="chart-stat-v" id="stat-volume">—</span>
+        </div>
+      </div>
+
+      <div class="chart-stat-section">
+        <div class="chart-stat-head">Indicators</div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">SMA 20</span>
+          <span class="chart-stat-v" id="stat-sma20">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">SMA 50</span>
+          <span class="chart-stat-v" id="stat-sma50">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">RSI 14</span>
+          <span class="chart-stat-v" id="stat-rsi">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">ATR</span>
+          <span class="chart-stat-v" id="stat-atr">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">BB Upper</span>
+          <span class="chart-stat-v" id="stat-bb-up">—</span>
+        </div>
+        <div class="chart-stat-row">
+          <span class="chart-stat-k">BB Lower</span>
+          <span class="chart-stat-v" id="stat-bb-lo">—</span>
+        </div>
+      </div>
+
+      <div class="chart-stat-section">
+        <div class="chart-stat-head">AlphaCore Signal</div>
+        <div class="chart-signal-box hold" id="chart-signal-box" role="status" aria-label="AlphaCore signal">Loading…</div>
+        <div style="margin-top:8px;color:var(--muted);font-size:11px;text-align:center;line-height:1.5"
+             id="chart-signal-conf"></div>
+      </div>
+
+      <!-- Lens Intelligence Summary widget -->
+      <div class="chart-stat-section" id="chart-lens-section">
+        <div class="chart-stat-head" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Lens AI</span>
+          <button class="chart-lens-refresh" onclick="refreshChartLens()" title="Refresh Lens">↻</button>
+        </div>
+        <div id="chart-lens-body" class="chart-lens-body">
+          <div class="chart-lens-loading">Loading…</div>
+        </div>
+      </div>
+
+      <div class="chart-stat-section">
+        <button class="chart-trade-btn"
+                onclick="goTrade()"
+                aria-label="Go to Trade page for {{ symbol }}">
+          Trade {{ symbol }}
+        </button>
+        <a href="{{ url_for('research') }}?symbol={{ symbol }}"
+           style="display:block;text-align:center;margin-top:8px;font-size:12px;color:var(--muted)">
+          AI Research →
+        </a>
+      </div>
+
+    </aside>
+
+  </div>
+
+  <!-- ════ Signal history for this symbol ══════════════════════════════════ -->
+  <section class="pf-card chart-signals-section" aria-label="Signal history">
+    <div class="pf-card-head">
+      <h2>Signal History — {{ symbol }}</h2>
+      <span class="ns-chip chip-muted" id="signals-count" aria-live="polite">Loading…</span>
+    </div>
+    <div class="pf-table-wrap">
+      <table class="pf-table" id="signals-table" aria-label="Signal events for {{ symbol }}">
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Signal</th>
+            <th scope="col">Confidence</th>
+            <th scope="col">Strategy</th>
+            <th scope="col">Price</th>
+            <th scope="col">Approved</th>
+            <th scope="col">Reason</th>
+          </tr>
+        </thead>
+        <tbody id="signals-tbody">
+          <tr><td colspan="7" class="empty">Loading signal history…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const SYMBOL = '{{ symbol }}';
+let currentTf    = '1Day';
+let currentLimit = 200;
+let autoRefreshId = null;
+let chartReady = false;
+
+// Active indicator flags
+const indActive = { sma20: true, sma50: true, ema9: false, rsi: true, vol: false };
+
+// TradingView chart objects
+let mainChart  = null, rsiChart   = null;
+let candleSeries  = null, volumeSeries = null;
+let sma20Series   = null, sma50Series  = null, ema9Series = null;
+let rsiSeries     = null, rsiObSeries  = null, rsiOsSeries = null;
+
+// ── Init ───────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // Guard: TradingView library must be present
+  if (typeof LightweightCharts === 'undefined') {
+    showChartError('TradingView Lightweight Charts library failed to load. Check your internet connection.');
+    return;
+  }
+  initCharts();
+  loadChartData();
+  loadSignalHistory();
+  loadAlphaCoreSignal();
+  startAutoRefresh();
+
+  // Keyboard shortcut: "/" focuses symbol input
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && document.activeElement !== document.getElementById('chart-sym-input')) {
+      e.preventDefault();
+      document.getElementById('chart-sym-input').focus();
+      document.getElementById('chart-sym-input').select();
+    }
+    if (e.key === 'Escape') {
+      document.getElementById('chart-sym-input').blur();
+    }
+  });
+});
+
+// ── Chart initialization ───────────────────────────────────────────────────
+function initCharts() {
+  const baseOpts = {
+    layout: {
+      background: { color: '#131a22' },
+      textColor: '#93a4b7',
+    },
+    grid: {
+      vertLines: { color: 'rgba(43,55,69,0.5)' },
+      horzLines: { color: 'rgba(43,55,69,0.5)' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#2b3745' },
+    timeScale: {
+      borderColor: '#2b3745',
+      timeVisible: true,
+      secondsVisible: false,
+      fixLeftEdge: false,
+      fixRightEdge: false,
+    },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
+    handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+  };
+
+  // ── Main chart
+  const mainEl = document.getElementById('chart-container');
+  mainChart = LightweightCharts.createChart(mainEl, {
+    ...baseOpts,
+    width:  mainEl.offsetWidth,
+    height: mainEl.offsetHeight || 420,
+  });
+
+  candleSeries = mainChart.addCandlestickSeries({
+    upColor:         '#00c98d',
+    downColor:       '#ff4d5e',
+    borderUpColor:   '#00c98d',
+    borderDownColor: '#ff4d5e',
+    wickUpColor:     '#00c98d',
+    wickDownColor:   '#ff4d5e',
+  });
+
+  // Volume histogram (overlaid at bottom 18% of main pane)
+  volumeSeries = mainChart.addHistogramSeries({
+    priceFormat:   { type: 'volume' },
+    priceScaleId:  'vol',
+    scaleMargins:  { top: 0.82, bottom: 0 },
+  });
+  mainChart.priceScale('vol').applyOptions({
+    scaleMargins: { top: 0.82, bottom: 0 },
+    visible: false,
+  });
+  if (!indActive.vol) volumeSeries.applyOptions({ visible: false });
+
+  // Overlay line series
+  sma20Series = mainChart.addLineSeries({ color: '#f59f00', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  sma50Series = mainChart.addLineSeries({ color: '#8ab4ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  ema9Series  = mainChart.addLineSeries({ color: '#e879f9', lineWidth: 1,   priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+
+  if (!indActive.sma20) sma20Series.applyOptions({ visible: false });
+  if (!indActive.sma50) sma50Series.applyOptions({ visible: false });
+  if (!indActive.ema9)  ema9Series.applyOptions({ visible: false });
+
+  // ── RSI sub-chart
+  const rsiEl = document.getElementById('rsi-container');
+  rsiChart = LightweightCharts.createChart(rsiEl, {
+    ...baseOpts,
+    width:  rsiEl.offsetWidth,
+    height: rsiEl.offsetHeight || 110,
+    timeScale: { visible: false },
+    rightPriceScale: {
+      borderColor: '#2b3745',
+      scaleMargins: { top: 0.08, bottom: 0.08 },
+    },
+  });
+
+  rsiSeries    = rsiChart.addLineSeries({ color: '#8ab4ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: true });
+  rsiObSeries  = rsiChart.addLineSeries({ color: 'rgba(255,77,94,0.4)',  lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+  rsiOsSeries  = rsiChart.addLineSeries({ color: 'rgba(0,201,141,0.4)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+
+  if (!indActive.rsi) {
+    document.getElementById('chart-rsi-wrap').classList.add('hidden');
+    document.getElementById('chart-canvas-wrap').classList.add('no-rsi');
+  }
+
+  // Crosshair tooltip
+  mainChart.subscribeCrosshairMove(updateTooltip);
+
+  // Sync RSI time-scale to main when user scrolls/zooms
+  mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range && rsiChart) {
+      try { rsiChart.timeScale().setVisibleLogicalRange(range); } catch(e) {}
+    }
+  });
+
+  // Resize when container changes size
+  const ro = new ResizeObserver(() => { setTimeout(resizeCharts, 10); });
+  ro.observe(document.getElementById('chart-canvas-wrap'));
+
+  chartReady = true;
+}
+
+// ── Resize ─────────────────────────────────────────────────────────────────
+function resizeCharts() {
+  const cw = document.getElementById('chart-canvas-wrap');
+  const rw = document.getElementById('chart-rsi-wrap');
+  if (mainChart && cw) mainChart.resize(cw.offsetWidth, cw.offsetHeight);
+  if (rsiChart && rw && !rw.classList.contains('hidden')) rsiChart.resize(rw.offsetWidth, rw.offsetHeight);
+}
+
+// ── Load full OHLCV data ───────────────────────────────────────────────────
+async function loadChartData() {
+  if (!chartReady) return;
+  setLoading(true);
+  try {
+    const r = await fetch(`/api/chart/${encodeURIComponent(SYMBOL)}/ohlcv?timeframe=${currentTf}&limit=${currentLimit}`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+      throw new Error(err.error || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+
+    if (!data.bars || !data.bars.length) {
+      throw new Error('No data returned for ' + SYMBOL);
+    }
+
+    // Show stale badge if data is simulated
+    document.getElementById('chart-stale').classList.toggle('visible', !!data.stale_data);
+
+    // Feed candlestick series
+    candleSeries.setData(data.bars.map(b => ({
+      time:  b.time,
+      open:  b.open,
+      high:  b.high,
+      low:   b.low,
+      close: b.close,
+    })));
+
+    // Volume series with green/red coloring
+    volumeSeries.setData(data.bars.map(b => ({
+      time:  b.time,
+      value: b.volume,
+      color: b.close >= b.open ? 'rgba(0,201,141,0.5)' : 'rgba(255,77,94,0.5)',
+    })));
+
+    // Overlay series
+    const ov = data.overlays || {};
+    sma20Series.setData(ov.sma20 || []);
+    sma50Series.setData(ov.sma50 || []);
+    ema9Series.setData(ov.ema9   || []);
+
+    // RSI + reference lines
+    const rsiData = ov.rsi14 || [];
+    rsiSeries.setData(rsiData);
+    if (rsiData.length >= 2) {
+      const firstT = rsiData[0].time;
+      const lastT  = rsiData[rsiData.length - 1].time;
+      rsiObSeries.setData([{ time: firstT, value: 70 }, { time: lastT, value: 70 }]);
+      rsiOsSeries.setData([{ time: firstT, value: 30 }, { time: lastT, value: 30 }]);
+    }
+
+    // Update UI from last bar
+    const last = data.bars[data.bars.length - 1];
+    const prev = data.bars.length >= 2 ? data.bars[data.bars.length - 2] : last;
+    updatePriceHeader(last, prev);
+    updateStatPanel(last, data.indicators || {});
+
+    mainChart.timeScale().fitContent();
+
+  } catch(err) {
+    console.error('[NexoSignal chart]', err);
+    showChartError(String(err.message || err));
+    if (typeof showToast === 'function') showToast('Chart load failed: ' + err.message, 'error');
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── Auto-refresh: update latest bar every 60s without re-rendering ────────
+function startAutoRefresh() {
+  clearInterval(autoRefreshId);
+  // Only auto-refresh on intraday timeframes or when market may be open
+  autoRefreshId = setInterval(fetchLatestBar, 60_000);
+  document.getElementById('refresh-dot').style.display = 'inline-block';
+}
+
+async function fetchLatestBar() {
+  if (!chartReady || !candleSeries) return;
+  try {
+    const r = await fetch(`/api/chart/${encodeURIComponent(SYMBOL)}/ohlcv?timeframe=${currentTf}&limit=2`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.bars || !data.bars.length) return;
+
+    const last = data.bars[data.bars.length - 1];
+    const prev = data.bars.length >= 2 ? data.bars[data.bars.length - 2] : last;
+
+    // Update the latest candle without full re-render
+    candleSeries.update({ time: last.time, open: last.open, high: last.high, low: last.low, close: last.close });
+    volumeSeries.update({ time: last.time, value: last.volume,
+      color: last.close >= last.open ? 'rgba(0,201,141,0.5)' : 'rgba(255,77,94,0.5)' });
+
+    updatePriceHeader(last, prev);
+  } catch(e) {}
+}
+
+// ── AlphaCore signal ──────────────────────────────────────────────────────
+async function loadAlphaCoreSignal() {
+  try {
+    const r = await fetch(`/api/nexosignal/risk-reward/${encodeURIComponent(SYMBOL)}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const rr  = d.risk_reward || {};
+    const sig = (rr.signal || 'hold').toLowerCase();
+    const box  = document.getElementById('chart-signal-box');
+    const conf = document.getElementById('chart-signal-conf');
+    box.className = `chart-signal-box ${sig}`;
+    const confPct = rr.confidence ? ` — ${Math.round(rr.confidence)}%` : '';
+    box.textContent = sig.toUpperCase() + confPct;
+    box.setAttribute('aria-label', `AlphaCore signal: ${sig}${confPct}`);
+    if (rr.entry_price != null) {
+      conf.innerHTML =
+        `Entry <strong>$${rr.entry_price.toFixed(2)}</strong> &nbsp;|&nbsp; ` +
+        `SL <strong class="bad">$${(rr.stop_loss || 0).toFixed(2)}</strong> &nbsp;|&nbsp; ` +
+        `TP <strong class="good">$${(rr.take_profit || 0).toFixed(2)}</strong>`;
+    }
+  } catch(e) {}
+}
+
+// ── Signal history ─────────────────────────────────────────────────────────
+async function loadSignalHistory() {
+  try {
+    const r = await fetch(`/api/chart/${encodeURIComponent(SYMBOL)}/signals`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    renderSignalTable(d.signals || []);
+  } catch(e) {
+    document.getElementById('signals-tbody').innerHTML =
+      `<tr><td colspan="7" class="empty">Signal history unavailable — ${e.message || 'check connection'}</td></tr>`;
+    document.getElementById('signals-count').textContent = '0 signals';
+  }
+}
+
+function renderSignalTable(signals) {
+  const tbody = document.getElementById('signals-tbody');
+  const count = document.getElementById('signals-count');
+  count.textContent = `${signals.length} signal${signals.length !== 1 ? 's' : ''}`;
+  if (!signals.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">No signals for ${SYMBOL} yet</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = signals.slice(0, 30).map(s => {
+    const sig  = (s.final_signal || s.signal || 'hold').toLowerCase();
+    const conf = parseFloat(s.confidence || 0);
+    const t    = (s.created_at || '').replace('T', ' ').slice(0, 19);
+    const ap   = s.approved;
+    return `<tr>
+      <td class="mono">${t || '—'}</td>
+      <td><span class="signal-pill sig-${sig}">${sig.toUpperCase()}</span></td>
+      <td>
+        <div class="conf-bar-wrap">
+          <div class="conf-bar" style="width:${Math.min(conf, 100)}%" aria-hidden="true"></div>
+          <span>${conf.toFixed(0)}</span>
+        </div>
+      </td>
+      <td class="muted">${s.strategy || 'AlphaCore'}</td>
+      <td>${s.price != null ? '$' + parseFloat(s.price).toFixed(2) : '—'}</td>
+      <td class="${ap ? 'good' : 'bad'}" aria-label="${ap ? 'Approved' : 'Rejected'}">${ap ? '✓' : '✗'}</td>
+      <td class="reason-cell">${(s.reason || '').slice(0, 90)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+function updatePriceHeader(last, prev) {
+  const change    = last.close - prev.close;
+  const changePct = prev.close ? (change / prev.close * 100) : 0;
+  const up        = change >= 0;
+
+  const priceEl = document.getElementById('chart-price');
+  const chgEl   = document.getElementById('chart-chg');
+
+  priceEl.textContent = fmtDollar(last.close, 4);
+  priceEl.setAttribute('aria-label', `Price: ${fmtDollar(last.close, 4)}`);
+
+  chgEl.className   = `chart-chg-badge ${up ? 'chart-chg-up' : 'chart-chg-down'}`;
+  chgEl.textContent = `${up ? '+' : ''}${change.toFixed(2)} (${up ? '+' : ''}${changePct.toFixed(2)}%)`;
+}
+
+function updateStatPanel(last, ind) {
+  const fv = (n, d=2) => n != null ? fmtDollar(n, d) : '—';
+  document.getElementById('stat-open').textContent   = fv(last.open);
+  document.getElementById('stat-high').textContent   = fv(last.high);
+  document.getElementById('stat-low').textContent    = fv(last.low);
+  document.getElementById('stat-close').textContent  = fv(last.close);
+  document.getElementById('stat-volume').textContent =
+    last.volume != null ? last.volume.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '—';
+  document.getElementById('stat-sma20').textContent  = fv(ind.sma20);
+  document.getElementById('stat-sma50').textContent  = fv(ind.sma50);
+  document.getElementById('stat-rsi').textContent    = ind.rsi != null ? parseFloat(ind.rsi).toFixed(1) : '—';
+  document.getElementById('stat-atr').textContent    = fv(ind.atr);
+  document.getElementById('stat-bb-up').textContent  = fv(ind.bb_upper);
+  document.getElementById('stat-bb-lo').textContent  = fv(ind.bb_lower);
+}
+
+function updateTooltip(param) {
+  const tip = document.getElementById('chart-tooltip');
+  if (!param.time || !param.seriesData) { tip.classList.remove('visible'); return; }
+  const d = param.seriesData.get(candleSeries);
+  if (!d) { tip.classList.remove('visible'); return; }
+  tip.classList.add('visible');
+  document.getElementById('tt-o').textContent = d.open  != null ? d.open.toFixed(2)  : '—';
+  document.getElementById('tt-h').textContent = d.high  != null ? d.high.toFixed(2)  : '—';
+  document.getElementById('tt-l').textContent = d.low   != null ? d.low.toFixed(2)   : '—';
+  document.getElementById('tt-c').textContent = d.close != null ? d.close.toFixed(2) : '—';
+}
+
+function showChartError(msg) {
+  const container = document.getElementById('chart-container');
+  container.innerHTML =
+    `<div class="chart-error">
+       <strong>⚠ Chart unavailable</strong>
+       <span>${msg}</span>
+       <button onclick="loadChartData()" style="margin-top:8px;font-size:12px;min-height:auto;padding:6px 14px">
+         Retry
+       </button>
+     </div>`;
+}
+
+function setLoading(on) {
+  document.getElementById('chart-loading').classList.toggle('visible', on);
+}
+
+function fmtDollar(n, decimals = 2) {
+  if (n == null) return '—';
+  return '$' + parseFloat(n).toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
+function setTf(btn) {
+  document.querySelectorAll('#chart-tf-group .chart-tf-btn').forEach(b => {
+    b.classList.remove('active');
+    b.removeAttribute('aria-pressed');
+  });
+  btn.classList.add('active');
+  btn.setAttribute('aria-pressed', 'true');
+  currentTf    = btn.dataset.tf;
+  currentLimit = ['5Min', '15Min'].includes(currentTf) ? 150 : ['1Hour', '4Hour'].includes(currentTf) ? 200 : 200;
+  clearInterval(autoRefreshId);
+  loadChartData();
+  startAutoRefresh();
+}
+
+function toggleInd(btn) {
+  const ind = btn.dataset.ind;
+  btn.classList.toggle('active');
+  const nowActive = btn.classList.contains('active');
+  btn.setAttribute('aria-pressed', String(nowActive));
+  indActive[ind] = nowActive;
+
+  const seriesMap = { sma20: sma20Series, sma50: sma50Series, ema9: ema9Series };
+  if (seriesMap[ind]) seriesMap[ind].applyOptions({ visible: nowActive });
+
+  if (ind === 'vol' && volumeSeries) volumeSeries.applyOptions({ visible: nowActive });
+
+  if (ind === 'rsi') {
+    const rw = document.getElementById('chart-rsi-wrap');
+    const cw = document.getElementById('chart-canvas-wrap');
+    rw.classList.toggle('hidden', !nowActive);
+    cw.classList.toggle('no-rsi', !nowActive);
+    setTimeout(resizeCharts, 60);
+  }
+}
+
+function handleSymInput(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const sym = (document.getElementById('chart-sym-input').value || '').trim().toUpperCase();
+    if (sym && sym !== SYMBOL) {
+      window.location.href = `/chart/${encodeURIComponent(sym)}`;
+    }
+  }
+}
+
+function goTrade() {
+  window.location.href = `/trade?symbol=${encodeURIComponent(SYMBOL)}&side=buy`;
+}
+
+// ── Lens AI Intelligence widget ───────────────────────────────────────────
+
+async function loadChartLens(sym) {
+  const body = document.getElementById('chart-lens-body');
+  if (!body) return;
+  body.innerHTML = '<div class="chart-lens-loading">Loading Lens…</div>';
+  try {
+    const r = await fetch(`/api/lens/summary/${encodeURIComponent(sym || SYMBOL)}`);
+    if (!r.ok) { body.innerHTML = '<div class="chart-lens-loading">Unavailable</div>'; return; }
+    const d = await r.json();
+    const sentColor = d.news_sentiment === 'bullish' ? 'var(--good)'
+                    : d.news_sentiment === 'bearish' ? 'var(--bad)' : 'var(--muted)';
+    const sigCls = d.signal === 'buy' ? 'good' : d.signal === 'sell' ? 'bad' : 'muted';
+    body.innerHTML = `
+      <div class="chart-lens-row">
+        <span class="chart-lens-k">Signal</span>
+        <span class="chart-lens-v ${sigCls}">${(d.signal || '—').toUpperCase()}</span>
+      </div>
+      <div class="chart-lens-row">
+        <span class="chart-lens-k">Sentiment</span>
+        <span class="chart-lens-v" style="color:${sentColor}">${d.news_sentiment || '—'}</span>
+      </div>
+      <div class="chart-lens-row">
+        <span class="chart-lens-k">Conviction</span>
+        <span class="chart-lens-v">${d.conviction_score ?? '—'}/100</span>
+      </div>
+      ${(d.key_insights || []).slice(0, 2).map(i =>
+        `<div class="chart-lens-insight">• ${i}</div>`
+      ).join('')}
+      <div class="chart-lens-rationale">${(d.rationale || '').slice(0, 100)}${d.rationale && d.rationale.length > 100 ? '…' : ''}</div>
+      <a href="/research?symbol=${encodeURIComponent(sym || SYMBOL)}" class="chart-lens-link">Full Lens →</a>
+    `;
+  } catch(e) {
+    body.innerHTML = '<div class="chart-lens-loading">—</div>';
+  }
+}
+
+function refreshChartLens() { loadChartLens(SYMBOL); }
+
+// Auto-load Lens when chart is ready
+document.addEventListener('DOMContentLoaded', () => { loadChartLens(SYMBOL); });
+</script>
+{% endblock %}

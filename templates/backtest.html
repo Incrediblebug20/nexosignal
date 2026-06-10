@@ -1,0 +1,611 @@
+{% extends "base.html" %}
+{% block title %}Backtest Engine — NexoSignal{% endblock %}
+{% block page_title %}Backtesting Engine{% endblock %}
+
+{% block content %}
+
+<!-- ════ Safety notice ══════════════════════════════════════════════════════ -->
+<div class="bt-safety-banner">
+  <span class="bt-safety-icon">🔬</span>
+  <div>
+    <strong>Simulation Only</strong> — All backtests run on historical data and never
+    place live or paper orders. Results are for research purposes only and do not
+    guarantee future performance. NexoSignal does not guarantee profitable trades.
+  </div>
+</div>
+
+<!-- ════ Config Form ════════════════════════════════════════════════════════ -->
+<div class="bt-layout">
+
+  <!-- Left: form panel -->
+  <div class="bt-form-panel">
+    <div class="bt-form-card">
+      <div class="bt-form-head">
+        <span class="bt-form-title">Configuration</span>
+        <span class="bt-mode-pill">SIMULATION</span>
+      </div>
+
+      <!-- Symbols -->
+      <div class="bt-field-group">
+        <label class="bt-label" for="bt-symbols">Symbols <span class="bt-hint">(comma-separated)</span></label>
+        <input id="bt-symbols" class="bt-input" type="text" placeholder="AAPL, MSFT, BTC/USD"
+               value="AAPL" maxlength="200">
+      </div>
+
+      <!-- Date range -->
+      <div class="bt-field-row">
+        <div class="bt-field-group">
+          <label class="bt-label" for="bt-date-from">From</label>
+          <input id="bt-date-from" class="bt-input" type="date" value="">
+        </div>
+        <div class="bt-field-group">
+          <label class="bt-label" for="bt-date-to">To</label>
+          <input id="bt-date-to" class="bt-input" type="date" value="">
+        </div>
+      </div>
+
+      <!-- Capital + Strategy -->
+      <div class="bt-field-row">
+        <div class="bt-field-group">
+          <label class="bt-label" for="bt-capital">Initial Capital ($)</label>
+          <input id="bt-capital" class="bt-input" type="number" min="100" max="1000000" step="100" value="10000">
+        </div>
+        <div class="bt-field-group">
+          <label class="bt-label" for="bt-strategy">Strategy</label>
+          <select id="bt-strategy" class="bt-select" onchange="updateParamPanel()">
+            <option value="sma_crossover">SMA Crossover</option>
+            <option value="rsi">RSI Mean Reversion</option>
+            <option value="vwap">VWAP Deviation</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Strategy-specific params -->
+      <div id="params-sma" class="bt-params-group">
+        <div class="bt-params-head">SMA Parameters</div>
+        <div class="bt-field-row">
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-sma-short">Short Period</label>
+            <input id="bt-sma-short" class="bt-input" type="number" min="2" max="50" value="5">
+          </div>
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-sma-long">Long Period</label>
+            <input id="bt-sma-long" class="bt-input" type="number" min="5" max="200" value="20">
+          </div>
+        </div>
+      </div>
+
+      <div id="params-rsi" class="bt-params-group" style="display:none">
+        <div class="bt-params-head">RSI Parameters</div>
+        <div class="bt-field-row">
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-rsi-period">Period</label>
+            <input id="bt-rsi-period" class="bt-input" type="number" min="2" max="50" value="14">
+          </div>
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-rsi-oversold">Oversold</label>
+            <input id="bt-rsi-oversold" class="bt-input" type="number" min="10" max="45" value="30">
+          </div>
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-rsi-overbought">Overbought</label>
+            <input id="bt-rsi-overbought" class="bt-input" type="number" min="55" max="90" value="70">
+          </div>
+        </div>
+      </div>
+
+      <div id="params-vwap" class="bt-params-group" style="display:none">
+        <div class="bt-params-head">VWAP Parameters</div>
+        <p class="bt-hint-text">VWAP strategy uses a fixed 0.5% deviation threshold. No additional parameters required.</p>
+      </div>
+
+      <!-- Advanced risk params -->
+      <details class="bt-advanced">
+        <summary class="bt-advanced-head">Advanced Risk Settings</summary>
+        <div class="bt-field-row" style="margin-top:12px">
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-commission">Commission (%)</label>
+            <input id="bt-commission" class="bt-input" type="number" min="0" max="5" step="0.01" value="0.1">
+          </div>
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-slippage">Slippage (%)</label>
+            <input id="bt-slippage" class="bt-input" type="number" min="0" max="5" step="0.01" value="0.05">
+          </div>
+          <div class="bt-field-group">
+            <label class="bt-label" for="bt-max-pos">Max Position (%)</label>
+            <input id="bt-max-pos" class="bt-input" type="number" min="1" max="100" value="20">
+          </div>
+        </div>
+      </details>
+
+      <!-- Action buttons -->
+      <div class="bt-btn-row">
+        <button id="bt-run-btn" class="bt-btn-primary" onclick="runBacktest()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Run Backtest
+        </button>
+        <button id="bt-opt-btn" class="bt-btn-secondary" onclick="runOptimizer()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
+          </svg>
+          Optimize Strategy
+        </button>
+      </div>
+
+      <div id="bt-run-error" class="bt-error-msg" style="display:none"></div>
+    </div>
+
+    <!-- Recent Runs -->
+    {% if recent_runs %}
+    <div class="bt-recent-card">
+      <div class="bt-recent-head">Recent Runs</div>
+      {% for run in recent_runs %}
+      <div class="bt-recent-row">
+        <div>
+          <div class="bt-recent-sym">{{ run.symbols }}</div>
+          <div class="bt-recent-meta">{{ run.strategy }} · {{ run.date_from }} → {{ run.date_to }}</div>
+        </div>
+        <div class="bt-recent-metrics">
+          <span class="{{ 'good' if (run.total_return_pct or 0) >= 0 else 'bad' }}">
+            {{ "%+.1f%%"|format(run.total_return_pct or 0) }}
+          </span>
+          <span class="muted">SR {{ "%.2f"|format(run.sharpe_ratio or 0) }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Right: results panel -->
+  <div class="bt-results-panel" id="bt-results-panel">
+
+    <!-- Loading state -->
+    <div id="bt-loading" class="bt-loading" style="display:none">
+      <div class="spinner"></div>
+      <div class="bt-loading-text">
+        <strong id="bt-loading-label">Running backtest…</strong>
+        <span id="bt-loading-sub">Fetching historical data and simulating trades</span>
+      </div>
+    </div>
+
+    <!-- Empty state -->
+    <div id="bt-empty" class="bt-empty">
+      <div class="bt-empty-icon">📊</div>
+      <div class="bt-empty-title">Ready to Backtest</div>
+      <div class="bt-empty-sub">Configure your strategy and click <strong>Run Backtest</strong> to simulate historical performance. Results appear here instantly.</div>
+    </div>
+
+    <!-- Metrics cards -->
+    <div id="bt-metrics" class="bt-metrics-strip" style="display:none">
+      <div class="bt-metric-card bt-metric-return">
+        <div class="bt-metric-label">Total Return</div>
+        <div class="bt-metric-val" id="m-return">—</div>
+        <div class="bt-metric-sub" id="m-equity">—</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Max Drawdown</div>
+        <div class="bt-metric-val bad" id="m-dd">—</div>
+        <div class="bt-metric-sub">Peak → Trough</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Sharpe Ratio</div>
+        <div class="bt-metric-val" id="m-sharpe">—</div>
+        <div class="bt-metric-sub">Annualised</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Win Rate</div>
+        <div class="bt-metric-val" id="m-winrate">—</div>
+        <div class="bt-metric-sub" id="m-wl">—</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Profit Factor</div>
+        <div class="bt-metric-val" id="m-pf">—</div>
+        <div class="bt-metric-sub" id="m-trades">—</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Sortino Ratio</div>
+        <div class="bt-metric-val" id="m-sortino">—</div>
+        <div class="bt-metric-sub" id="m-source">—</div>
+      </div>
+    </div>
+
+    <!-- Equity curve chart -->
+    <div id="bt-chart-section" class="bt-section-card" style="display:none">
+      <div class="bt-section-head">
+        <span>Equity Curve</span>
+        <span class="ns-chip chip-muted" id="bt-chart-meta" style="font-size:11px"></span>
+      </div>
+      <div id="bt-equity-chart" class="bt-equity-chart"></div>
+    </div>
+
+    <!-- Trade log -->
+    <div id="bt-trades-section" class="bt-section-card" style="display:none">
+      <div class="bt-section-head">
+        <span>Trade Log</span>
+        <div class="bt-trades-filters">
+          <select id="bt-filter-sym" class="lh-filter-select" onchange="filterTrades()">
+            <option value="">All symbols</option>
+          </select>
+          <select id="bt-filter-side" class="lh-filter-select" onchange="filterTrades()">
+            <option value="">Both sides</option>
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+          <select id="bt-filter-exit" class="lh-filter-select" onchange="filterTrades()">
+            <option value="">All exits</option>
+            <option value="take_profit">Take Profit</option>
+            <option value="stop_loss">Stop Loss</option>
+            <option value="signal">Signal</option>
+            <option value="end_of_data">End of Data</option>
+          </select>
+          <span class="ns-chip chip-muted" id="bt-trade-count" style="font-size:11px">0 trades</span>
+        </div>
+      </div>
+      <div class="pf-table-wrap">
+        <table class="pf-table bt-trade-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Entry Date</th>
+              <th>Entry $</th>
+              <th>Exit Date</th>
+              <th>Exit $</th>
+              <th>Qty</th>
+              <th>P&amp;L</th>
+              <th>P&amp;L %</th>
+              <th>Exit Reason</th>
+            </tr>
+          </thead>
+          <tbody id="bt-trades-tbody">
+            <tr><td colspan="10" class="empty">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Optimizer results -->
+    <div id="bt-opt-section" class="bt-section-card" style="display:none">
+      <div class="bt-section-head">
+        <span>Optimizer Results</span>
+        <span class="ns-chip chip-muted" id="bt-opt-meta" style="font-size:11px"></span>
+      </div>
+      <div class="bt-opt-best" id="bt-opt-best" style="display:none">
+        <div class="bt-opt-best-label">Best Parameters</div>
+        <div class="bt-opt-best-params" id="bt-opt-best-params"></div>
+      </div>
+      <div class="pf-table-wrap">
+        <table class="pf-table bt-trade-table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Parameters</th>
+              <th>Score</th>
+              <th>IS Return</th>
+              <th>IS Sharpe</th>
+              <th>IS Win%</th>
+              <th>OOS Return</th>
+              <th>OOS Sharpe</th>
+            </tr>
+          </thead>
+          <tbody id="bt-opt-tbody">
+            <tr><td colspan="8" class="empty">Run optimizer to see parameter rankings</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── Initialise default dates ────────────────────────────────────────────────
+(function() {
+  const today = new Date();
+  const yyyy  = today.getFullYear();
+  const mm    = String(today.getMonth() + 1).padStart(2, '0');
+  const dd    = String(today.getDate()).padStart(2, '0');
+  document.getElementById('bt-date-to').value   = `${yyyy}-${mm}-${dd}`;
+  const yearAgo = new Date(today);
+  yearAgo.setFullYear(yyyy - 1);
+  const yy2 = yearAgo.getFullYear();
+  const mm2 = String(yearAgo.getMonth() + 1).padStart(2, '0');
+  const dd2 = String(yearAgo.getDate()).padStart(2, '0');
+  document.getElementById('bt-date-from').value = `${yy2}-${mm2}-${dd2}`;
+})();
+
+function updateParamPanel() {
+  const strategy = document.getElementById('bt-strategy').value;
+  ['sma','rsi','vwap'].forEach(s => {
+    const el = document.getElementById('params-' + s);
+    if (el) el.style.display = s === strategy.replace('_crossover','').replace('_','-').split('_')[0] ? '' : 'none';
+  });
+  // Resolve mapping
+  document.getElementById('params-sma').style.display  = strategy === 'sma_crossover' ? '' : 'none';
+  document.getElementById('params-rsi').style.display  = strategy === 'rsi'           ? '' : 'none';
+  document.getElementById('params-vwap').style.display = strategy === 'vwap'          ? '' : 'none';
+}
+
+function _collectForm() {
+  return {
+    symbols:          document.getElementById('bt-symbols').value,
+    date_from:        document.getElementById('bt-date-from').value,
+    date_to:          document.getElementById('bt-date-to').value,
+    initial_capital:  parseFloat(document.getElementById('bt-capital').value) || 10000,
+    strategy:         document.getElementById('bt-strategy').value,
+    sma_short:        parseInt(document.getElementById('bt-sma-short').value) || 5,
+    sma_long:         parseInt(document.getElementById('bt-sma-long').value) || 20,
+    rsi_period:       parseInt(document.getElementById('bt-rsi-period').value) || 14,
+    rsi_oversold:     parseFloat(document.getElementById('bt-rsi-oversold').value) || 30,
+    rsi_overbought:   parseFloat(document.getElementById('bt-rsi-overbought').value) || 70,
+    commission_pct:   (parseFloat(document.getElementById('bt-commission').value) || 0.1) / 100,
+    slippage_pct:     (parseFloat(document.getElementById('bt-slippage').value) || 0.05) / 100,
+    max_position_pct: (parseFloat(document.getElementById('bt-max-pos').value) || 20) / 100,
+  };
+}
+
+function _setLoading(active, label, sub) {
+  document.getElementById('bt-loading').style.display    = active ? 'flex' : 'none';
+  document.getElementById('bt-empty').style.display      = active ? 'none' : '';
+  document.getElementById('bt-loading-label').textContent = label || 'Running…';
+  document.getElementById('bt-loading-sub').textContent   = sub   || '';
+  document.getElementById('bt-run-btn').disabled = active;
+  document.getElementById('bt-opt-btn').disabled = active;
+  document.getElementById('bt-run-error').style.display = 'none';
+}
+
+function _showError(msg) {
+  const el = document.getElementById('bt-run-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+  _setLoading(false);
+}
+
+// ── Equity chart (TradingView Lightweight Charts line series) ──────────────
+
+let _btChart = null, _btSeries = null;
+
+function _renderEquityCurve(curve, initialCapital) {
+  const container = document.getElementById('bt-equity-chart');
+  if (!container || !curve || !curve.length) return;
+
+  if (_btChart) { _btChart.remove(); _btChart = null; _btSeries = null; }
+
+  _btChart = LightweightCharts.createChart(container, {
+    width:  container.clientWidth,
+    height: 280,
+    layout: { background: { color: '#111820' }, textColor: '#93a4b7' },
+    grid:   { vertLines: { color: '#2b3745' }, horzLines: { color: '#2b3745' } },
+    rightPriceScale: { borderColor: '#2b3745' },
+    timeScale: { borderColor: '#2b3745', timeVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+
+  // Baseline (initial capital)
+  const baselineSeries = _btChart.addLineSeries({
+    color: 'rgba(147,164,183,0.25)',
+    lineWidth: 1,
+    lineStyle: 2,  // dashed
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+  baselineSeries.setData(curve.map(p => ({ time: p.time, value: initialCapital })));
+
+  // Equity line
+  const finalVal = curve[curve.length - 1]?.value ?? initialCapital;
+  const color = finalVal >= initialCapital ? '#00c98d' : '#ff4d5e';
+  _btSeries = _btChart.addAreaSeries({
+    lineColor: color,
+    topColor:   finalVal >= initialCapital ? 'rgba(0,201,141,0.2)' : 'rgba(255,77,94,0.2)',
+    bottomColor: 'rgba(0,0,0,0)',
+    lineWidth: 2,
+    priceLineVisible: false,
+  });
+  _btSeries.setData(curve.map(p => ({ time: p.time, value: p.value })));
+  _btChart.timeScale().fitContent();
+
+  new ResizeObserver(() => {
+    if (_btChart && container.clientWidth > 0)
+      _btChart.applyOptions({ width: container.clientWidth });
+  }).observe(container);
+}
+
+// ── Backtest run ────────────────────────────────────────────────────────────
+
+let _allTrades = [];
+
+async function runBacktest() {
+  const form = _collectForm();
+  if (!form.symbols.trim()) { _showError('Enter at least one symbol.'); return; }
+
+  _setLoading(true, 'Running backtest…', `Fetching ${form.symbols} · ${form.date_from} → ${form.date_to}`);
+  document.getElementById('bt-empty').style.display = 'none';
+  ['bt-metrics','bt-chart-section','bt-trades-section','bt-opt-section'].forEach(id => {
+    document.getElementById(id).style.display = 'none';
+  });
+
+  try {
+    const r = await fetch('/api/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form),
+    });
+    const data = await r.json();
+    if (!data.ok || data.error) { _showError(data.error || 'Backtest failed.'); return; }
+    _renderBacktestResult(data.result, form);
+  } catch(e) {
+    _showError('Network error: ' + e.message);
+  } finally {
+    _setLoading(false);
+  }
+}
+
+function _renderBacktestResult(res, form) {
+  if (res.error) { _showError(res.error); return; }
+
+  // Metrics
+  const ret    = res.total_return_pct || 0;
+  const retCls = ret >= 0 ? 'good' : 'bad';
+  document.getElementById('m-return').innerHTML   = `<span class="${retCls}">${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%</span>`;
+  document.getElementById('m-equity').textContent  = `$${(res.final_equity || 0).toLocaleString('en-US',{maximumFractionDigits:2})} final`;
+  document.getElementById('m-dd').textContent      = `-${(res.max_drawdown_pct || 0).toFixed(2)}%`;
+  document.getElementById('m-sharpe').textContent  = (res.sharpe_ratio || 0).toFixed(3);
+  document.getElementById('m-winrate').textContent = `${(res.win_rate || 0).toFixed(1)}%`;
+  document.getElementById('m-wl').textContent      = `${res.num_wins||0}W / ${res.num_losses||0}L`;
+  document.getElementById('m-pf').textContent      = (res.profit_factor || 0).toFixed(2);
+  document.getElementById('m-trades').textContent  = `${res.num_trades||0} trades`;
+  document.getElementById('m-sortino').textContent = (res.sortino_ratio || 0).toFixed(3);
+  document.getElementById('m-source').textContent  = `Data: ${res.data_source || '—'} · ${res.duration_sec||0}s`;
+  document.getElementById('bt-metrics').style.display = '';
+
+  // Equity curve
+  if (res.equity_curve && res.equity_curve.length) {
+    document.getElementById('bt-chart-section').style.display = '';
+    document.getElementById('bt-chart-meta').textContent =
+      `${res.equity_curve.length} data points · ${form.date_from} → ${form.date_to}`;
+    setTimeout(() => _renderEquityCurve(res.equity_curve, form.initial_capital), 50);
+  }
+
+  // Trade log
+  _allTrades = res.trade_log || [];
+  if (_allTrades.length) {
+    document.getElementById('bt-trades-section').style.display = '';
+    // Populate symbol filter
+    const syms = [...new Set(_allTrades.map(t => t.symbol))];
+    const sel = document.getElementById('bt-filter-sym');
+    sel.innerHTML = '<option value="">All symbols</option>' +
+      syms.map(s => `<option value="${s}">${s}</option>`).join('');
+    renderTradeLog(_allTrades);
+  }
+
+  if (typeof showToast !== 'undefined')
+    showToast(`Backtest complete: ${ret >= 0 ? '+' : ''}${ret.toFixed(2)}% return, Sharpe ${(res.sharpe_ratio||0).toFixed(2)}`, 'success');
+}
+
+function renderTradeLog(trades) {
+  const tbody = document.getElementById('bt-trades-tbody');
+  document.getElementById('bt-trade-count').textContent = `${trades.length} trades`;
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No trades in this backtest</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnl    = t.pnl || 0;
+    const pnlCls = pnl >= 0 ? 'good' : 'bad';
+    const exitMap = {
+      take_profit: '<span class="bt-exit-tp">TP</span>',
+      stop_loss:   '<span class="bt-exit-sl">SL</span>',
+      signal:      '<span class="bt-exit-sig">Signal</span>',
+      end_of_data: '<span class="bt-exit-eod">EOD</span>',
+    };
+    const sideCls = t.side === 'buy' ? 'good' : 'bad';
+    return `<tr>
+      <td><strong>${t.symbol}</strong></td>
+      <td class="${sideCls}"><strong>${(t.side||'—').toUpperCase()}</strong></td>
+      <td class="muted">${t.entry_date||'—'}</td>
+      <td>$${(t.entry_price||0).toFixed(4)}</td>
+      <td class="muted">${t.exit_date||'—'}</td>
+      <td>$${(t.exit_price||0).toFixed(4)}</td>
+      <td class="muted">${(t.qty||0).toFixed(4)}</td>
+      <td class="${pnlCls}"><strong>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</strong></td>
+      <td class="${pnlCls}">${(t.pnl_pct||0) >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}%</td>
+      <td>${exitMap[t.exit_reason] || t.exit_reason || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterTrades() {
+  const sym  = document.getElementById('bt-filter-sym').value;
+  const side = document.getElementById('bt-filter-side').value;
+  const exit = document.getElementById('bt-filter-exit').value;
+  const filtered = _allTrades.filter(t =>
+    (!sym  || t.symbol === sym) &&
+    (!side || t.side === side)  &&
+    (!exit || t.exit_reason === exit)
+  );
+  renderTradeLog(filtered);
+}
+
+// ── Optimizer run ────────────────────────────────────────────────────────────
+
+async function runOptimizer() {
+  const form = _collectForm();
+  if (!form.symbols.trim()) { _showError('Enter at least one symbol.'); return; }
+
+  _setLoading(true, 'Running optimizer…', 'Grid search in progress — this may take 30–90 seconds');
+  document.getElementById('bt-empty').style.display = 'none';
+  document.getElementById('bt-opt-section').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/optimize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...form, walk_forward: true, rank_by: 'sharpe_ratio' }),
+    });
+    const data = await r.json();
+    if (!data.ok || data.error) { _showError(data.error || 'Optimizer failed.'); return; }
+    _renderOptResult(data.result);
+  } catch(e) {
+    _showError('Network error: ' + e.message);
+  } finally {
+    _setLoading(false);
+  }
+}
+
+function _renderOptResult(res) {
+  document.getElementById('bt-opt-section').style.display = '';
+  document.getElementById('bt-opt-meta').textContent =
+    `${res.total_combinations} combinations · ${res.duration_sec}s · ranked by ${res.rank_by}`;
+
+  if (res.best_params && Object.keys(res.best_params).length) {
+    document.getElementById('bt-opt-best').style.display = '';
+    const paramStr = Object.entries(res.best_params)
+      .map(([k, v]) => `<span class="bt-param-pill"><strong>${k}</strong>: ${v}</span>`)
+      .join('');
+    document.getElementById('bt-opt-best-params').innerHTML = paramStr;
+  }
+
+  const tbody = document.getElementById('bt-opt-tbody');
+  const runs  = res.runs || [];
+  if (!runs.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No optimization results</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = runs.map(run => {
+    const is  = run.is  || {};
+    const oos = run.oos || {};
+    const paramStr = Object.entries(run.params || {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    const isRet  = is.total_return_pct  || 0;
+    const oosRet = oos.total_return_pct || 0;
+    return `<tr class="${run.rank === 1 ? 'bt-opt-best-row' : ''}">
+      <td><strong>#${run.rank}</strong></td>
+      <td class="muted" style="font-size:11px">${paramStr}</td>
+      <td><strong>${(run.combined_score||0).toFixed(3)}</strong></td>
+      <td class="${isRet >= 0 ? 'good' : 'bad'}">${isRet >= 0 ? '+' : ''}${isRet.toFixed(2)}%</td>
+      <td>${(is.sharpe_ratio||0).toFixed(3)}</td>
+      <td>${(is.win_rate||0).toFixed(1)}%</td>
+      <td class="${oosRet >= 0 ? 'good' : 'bad'}">${oosRet >= 0 ? '+' : ''}${oosRet.toFixed(2)}%</td>
+      <td>${(oos.sharpe_ratio||0).toFixed(3)}</td>
+    </tr>`;
+  }).join('');
+
+  if (typeof showToast !== 'undefined')
+    showToast(`Optimizer done: ${res.total_combinations} combinations, best Sharpe ${(runs[0]?.combined_score||0).toFixed(2)}`, 'success');
+}
+
+// Resize equity chart on window resize
+window.addEventListener('resize', () => {
+  if (_btChart) {
+    const c = document.getElementById('bt-equity-chart');
+    if (c && c.clientWidth > 0) _btChart.applyOptions({ width: c.clientWidth });
+  }
+});
+</script>
+{% endblock %}

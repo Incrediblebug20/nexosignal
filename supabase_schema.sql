@@ -24,6 +24,20 @@ alter table trade_events add column if not exists target_stop_loss double precis
 alter table trade_events add column if not exists target_take_profit double precision;
 alter table trade_events add column if not exists current_risk_reward_ratio double precision;
 alter table trade_events add column if not exists execution_mode text not null default 'manual';
+alter table trade_events add column if not exists asset_type text;
+alter table trade_events add column if not exists order_lifecycle_status text;
+alter table trade_events add column if not exists entry_price double precision;
+alter table trade_events add column if not exists exit_price double precision;
+alter table trade_events add column if not exists realized_risk_reward_ratio double precision;
+alter table trade_events add column if not exists realized_pnl double precision;
+alter table trade_events add column if not exists unrealized_pnl double precision;
+alter table trade_events add column if not exists position_size double precision;
+alter table trade_events add column if not exists dollar_risk double precision;
+alter table trade_events add column if not exists notional_exposure double precision;
+alter table trade_events add column if not exists strategy_name text;
+alter table trade_events add column if not exists circuit_breaker_triggered boolean not null default false;
+alter table trade_events add column if not exists risk_check_passed boolean;
+alter table trade_events add column if not exists risk_rejection_reason text;
 
 do $$
 begin
@@ -92,6 +106,20 @@ alter table signal_events enable row level security;
 
 alter table signal_events add column if not exists confluence_score double precision;
 alter table signal_events add column if not exists order_book_imbalance double precision;
+alter table signal_events add column if not exists asset_type text;
+alter table signal_events add column if not exists strategy_name text;
+alter table signal_events add column if not exists confidence_score double precision;
+alter table signal_events add column if not exists expected_direction text;
+alter table signal_events add column if not exists entry_price double precision;
+alter table signal_events add column if not exists target_stop_loss double precision;
+alter table signal_events add column if not exists target_take_profit double precision;
+alter table signal_events add column if not exists risk_reward_ratio double precision;
+alter table signal_events add column if not exists expected_r_multiple double precision;
+alter table signal_events add column if not exists expected_value_score double precision;
+alter table signal_events add column if not exists prediction_rank integer;
+alter table signal_events add column if not exists signal_reason text;
+alter table signal_events add column if not exists blocked_reason text;
+alter table signal_events add column if not exists stale_data boolean not null default false;
 
 create table if not exists agent_events (
     id bigserial primary key,
@@ -222,3 +250,94 @@ create table if not exists performance_events (
 
 create index if not exists performance_events_created_at_idx on performance_events (created_at desc);
 alter table performance_events enable row level security;
+
+create table if not exists daily_summaries (
+    id bigserial primary key,
+    trade_date date not null unique,
+    total_trades integer not null default 0,
+    wins integer not null default 0,
+    losses integer not null default 0,
+    win_loss_ratio double precision,
+    net_pnl double precision,
+    average_r double precision,
+    max_drawdown double precision,
+    circuit_breaker_triggered boolean not null default false,
+    top_prediction_symbol text,
+    notes text,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists daily_summaries_trade_date_idx on daily_summaries (trade_date desc);
+alter table daily_summaries enable row level security;
+
+-- ── NexoSignal Autopilot: Strategy Portfolios ─────────────────────────────
+-- Each row is one named strategy configuration that can be armed as an autopilot.
+create table if not exists strategy_portfolios (
+    id bigserial primary key,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    name text not null,
+    description text,
+    symbols text not null default '',          -- comma-separated ticker list
+    strategy_type text not null default 'sma_crossover',
+    allocation_pct double precision not null default 0.1,  -- fraction of portfolio (0.1 = 10%)
+    max_position_usd double precision not null default 1000.0,
+    max_drawdown_pct double precision not null default 0.05,
+    daily_loss_limit_usd double precision not null default 500.0,
+    min_confidence double precision not null default 70.0,
+    min_risk_reward double precision not null default 5.0,
+    autopilot_active boolean not null default false,
+    dry_run boolean not null default true,
+    total_trades integer not null default 0,
+    wins integer not null default 0,
+    losses integer not null default 0,
+    total_pnl double precision not null default 0.0
+);
+
+create index if not exists strategy_portfolios_created_at_idx
+    on strategy_portfolios (created_at desc);
+
+alter table strategy_portfolios enable row level security;
+
+-- NexoSignal Lens: AI intelligence report cache
+-- Stores structured summaries and custom query results from the Lens layer.
+create table if not exists lens_reports (
+    id bigserial primary key,
+    created_at timestamptz not null default now(),
+    symbol text not null,
+    report_type text not null default 'summary',  -- 'summary' | 'ask'
+    content_json jsonb not null default '{}',
+    conviction_score double precision,
+    expires_at timestamptz,
+    query text                                     -- populated for report_type='ask'
+);
+
+create index if not exists lens_reports_symbol_type_idx
+    on lens_reports (symbol, report_type, created_at desc);
+
+alter table lens_reports enable row level security;
+
+-- NexoSignal Backtester: historical strategy simulation run results
+create table if not exists backtest_runs (
+    id bigserial primary key,
+    created_at timestamptz not null default now(),
+    run_id text not null unique,
+    symbols text not null,
+    strategy text not null,
+    params_json jsonb not null default '{}',
+    date_from text not null,
+    date_to text not null,
+    initial_capital double precision not null,
+    final_equity double precision,
+    total_return_pct double precision,
+    max_drawdown_pct double precision,
+    sharpe_ratio double precision,
+    win_rate double precision,
+    num_trades integer,
+    data_source text
+);
+
+create index if not exists backtest_runs_created_at_idx
+    on backtest_runs (created_at desc);
+
+alter table backtest_runs enable row level security;

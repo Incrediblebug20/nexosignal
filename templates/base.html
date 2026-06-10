@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}NexoSignal{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <script defer src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </head>
 <body>
@@ -16,115 +18,300 @@
 {% if config.TRADING_MODE == 'live' %}
 <div class="live-banner">
   <span>⚠</span>
-  <strong>LIVE TRADING ACTIVE</strong> — Real money is at risk. All orders execute on your brokerage account immediately.
+  <strong>LIVE TRADING ACTIVE</strong> — Real money is at risk. All orders execute immediately.
   <button onclick="switchToPaper()" class="live-banner-btn">Switch to Paper</button>
 </div>
 {% endif %}
 
-<!-- ════════════════════════════════════════ MAIN TOPBAR ══════════════════════ -->
-<header class="ns-topbar">
-  <div class="ns-topbar-inner">
+<!-- ════════════════════════════════════ APP SHELL ══════════════════════════ -->
+<div class="ns-shell" x-data="nsShell()" x-cloak>
 
-    <!-- Logo -->
-    <a href="{{ url_for('dashboard') }}" class="ns-logo">
-      <span class="ns-mark">NS</span>
-      <div class="ns-wordmark">
-        <strong>NexoSignal</strong>
-        <span>AI Trading Platform</span>
-      </div>
-    </a>
+  <!-- Mobile backdrop -->
+  <div class="ns-overlay" x-show="mob" x-transition.opacity @click="mob=false"></div>
 
-    <!-- Primary Nav — 4 pages only -->
-    <nav class="ns-nav">
+  <!-- ══════════════════════════════════ SIDEBAR ════════════════════════════ -->
+  <aside class="ns-sidebar"
+         :class="{ 'ns-sb-collapsed': !desk, 'ns-sb-mob-open': mob }">
+
+    <!-- Logo row + collapse toggle -->
+    <div class="ns-sb-head">
+      <a href="{{ url_for('dashboard') }}" class="ns-sb-logo" :title="desk ? '' : 'NexoSignal'">
+        <span class="ns-mark">NS</span>
+        <div class="ns-wordmark" x-show="desk" x-transition.opacity.duration.200ms>
+          <strong>NexoSignal</strong>
+          <span>AI Trading Platform</span>
+        </div>
+      </a>
+      <button class="ns-sb-toggle" @click="desk=!desk; persist()"
+              :title="desk ? 'Collapse sidebar' : 'Expand sidebar'">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path :d="desk ? 'M15 18l-6-6 6-6' : 'M9 18l6-6-6-6'" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Primary nav -->
+    <nav class="ns-sb-nav" aria-label="Main navigation">
+
       <a href="{{ url_for('dashboard') }}"
-         class="ns-nav-link {% if request.endpoint == 'dashboard' %}ns-nav-active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="7" height="9" rx="1"/><rect x="13" y="3" width="9" height="5" rx="1"/><rect x="13" y="12" width="9" height="9" rx="1"/><rect x="2" y="16" width="7" height="5" rx="1"/></svg>
-        Portfolio
+         class="ns-slink{% if request.endpoint == 'dashboard' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Portfolio'"
+         aria-label="Portfolio"
+         {% if request.endpoint == 'dashboard' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <rect x="2" y="3" width="7" height="9" rx="1"/>
+          <rect x="13" y="3" width="9" height="5" rx="1"/>
+          <rect x="13" y="12" width="9" height="9" rx="1"/>
+          <rect x="2" y="16" width="7" height="5" rx="1"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Portfolio</span>
       </a>
+
       <a href="{{ url_for('markets') }}"
-         class="ns-nav-link {% if request.endpoint == 'markets' %}ns-nav-active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
-        Markets
+         class="ns-slink{% if request.endpoint == 'markets' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Markets'"
+         aria-label="Markets"
+         {% if request.endpoint == 'markets' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+          <polyline points="16 7 22 7 22 13"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Markets</span>
       </a>
+
+      <a href="/chart/AAPL"
+         class="ns-slink{% if request.endpoint == 'chart' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Charts'"
+         aria-label="Charts"
+         {% if request.endpoint == 'chart' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <polyline points="7 17 10 12 13 15 16 9 19 12"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Charts</span>
+      </a>
+
       <a href="{{ url_for('research') }}"
-         class="ns-nav-link {% if request.endpoint == 'research' %}ns-nav-active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        Research
+         class="ns-slink{% if request.endpoint == 'research' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Research'"
+         aria-label="Research & Intelligence"
+         {% if request.endpoint == 'research' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Research</span>
       </a>
+
       <a href="{{ url_for('trade') }}"
-         class="ns-nav-link {% if request.endpoint == 'trade' %}ns-nav-active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-        Trade
+         class="ns-slink{% if request.endpoint == 'trade' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Trade'"
+         aria-label="Trade"
+         {% if request.endpoint == 'trade' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Trade</span>
+      </a>
+
+      <a href="{{ url_for('backtest_page') }}"
+         class="ns-slink{% if request.endpoint == 'backtest_page' %} ns-slink-active{% endif %}"
+         :title="desk ? '' : 'Backtest'"
+         aria-label="Backtesting Engine"
+         {% if request.endpoint == 'backtest_page' %}aria-current="page"{% endif %}>
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+          <polyline points="17 6 23 6 23 12"/>
+          <line x1="1" y1="6" x2="7" y2="6"/>
+          <line x1="1" y1="10" x2="5" y2="10"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Backtest</span>
+      </a>
+
+    </nav>
+
+    <div class="ns-sb-divider"></div>
+
+    <!-- Secondary nav -->
+    <nav class="ns-sb-nav" aria-label="Secondary navigation">
+      <a href="{{ url_for('trade') }}#bot-log"
+         class="ns-slink"
+         :title="desk ? '' : 'Logs'"
+         aria-label="Agent Logs">
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Logs</span>
+      </a>
+
+      <a href="{{ url_for('system_health_page') }}"
+         class="ns-slink"
+         :title="desk ? '' : 'Health'"
+         aria-label="System Health">
+        <svg class="ns-slink-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+        <span class="ns-slink-label" x-show="desk" x-transition.opacity.duration.150ms>Health</span>
       </a>
     </nav>
 
-    <!-- Right section: market status + paper/live toggle + user -->
-    <div class="ns-topbar-right">
-
-      <!-- Market Open/Closed -->
-      <div class="ns-market-status" id="ns-mkt-status">
-        <span class="ns-mkt-dot" id="ns-mkt-dot"></span>
-        <span id="ns-mkt-label">Market</span>
+    <!-- Footer: mode badge + username -->
+    <div class="ns-sb-footer">
+      <div class="ns-sb-mode">
+        <span class="ns-chip {% if config.TRADING_MODE == 'live' %}chip-bad{% else %}chip-good{% endif %}" style="flex-shrink:0;font-size:10px">
+          {{ config.TRADING_MODE|upper }}
+        </span>
+        <span class="ns-sb-mode-label" x-show="desk" x-transition.opacity.duration.150ms>
+          {% if session.get("username") %}{{ session["username"] }}{% endif %}
+        </span>
       </div>
+    </div>
 
-      <!-- Paper / Live Toggle -->
-      <div class="ns-mode-wrap" id="ns-mode-wrap">
-        <span class="ns-mode-label ns-paper-label {% if config.TRADING_MODE == 'paper' %}ns-mode-on{% endif %}">PAPER</span>
-        <button id="ns-mode-toggle"
-                class="ns-toggle-btn {% if config.TRADING_MODE == 'live' %}ns-toggle-live{% endif %}"
-                onclick="confirmToggleMode()"
-                title="{{ 'Click to switch to Paper trading' if config.TRADING_MODE == 'live' else 'Click to switch to Live trading — real money!' }}">
-          <span class="ns-toggle-knob"></span>
+  </aside>
+
+  <!-- ════════════════════════════════ MAIN AREA ════════════════════════════ -->
+  <div class="ns-main-area">
+
+    <!-- ── Topbar ──────────────────────────────────────────────────────────── -->
+    <header class="ns-topbar">
+      <div class="ns-topbar-inner">
+
+        <!-- Hamburger (mobile only — desktop uses sidebar toggle) -->
+        <button class="ns-hamburger" @click="mob=!mob" aria-label="Toggle navigation">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
         </button>
-        <span class="ns-mode-label ns-live-label {% if config.TRADING_MODE == 'live' %}ns-mode-on{% endif %}">LIVE</span>
+
+        <!-- Page title -->
+        <div class="ns-breadcrumb">
+          <span class="ns-breadcrumb-page">{% block page_title %}NexoSignal{% endblock %}</span>
+        </div>
+
+        <div style="flex:1;min-width:0"></div>
+
+        <!-- Market Open/Closed -->
+        <div class="ns-market-status" id="ns-mkt-status">
+          <span class="ns-mkt-dot" id="ns-mkt-dot"></span>
+          <span id="ns-mkt-label">Market</span>
+        </div>
+
+        <!-- Paper / Live Toggle -->
+        <div class="ns-mode-wrap" id="ns-mode-wrap">
+          <span class="ns-mode-label ns-paper-label {% if config.TRADING_MODE == 'paper' %}ns-mode-on{% endif %}">PAPER</span>
+          <button id="ns-mode-toggle"
+                  class="ns-toggle-btn {% if config.TRADING_MODE == 'live' %}ns-toggle-live{% endif %}"
+                  onclick="confirmToggleMode()"
+                  title="{{ 'Click to switch to Paper trading' if config.TRADING_MODE == 'live' else 'Click to switch to Live trading — real money!' }}">
+            <span class="ns-toggle-knob"></span>
+          </button>
+          <span class="ns-mode-label ns-live-label {% if config.TRADING_MODE == 'live' %}ns-mode-on{% endif %}">LIVE</span>
+        </div>
+
+        <!-- User chip -->
+        {% if session.get("username") %}
+        <div class="ns-user">
+          <span class="ns-avatar">{{ session["username"][0]|upper }}</span>
+          <span class="ns-uname ns-uname-hide">{{ session["username"] }}</span>
+        </div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('logout') }}" style="margin:0">
+          <button class="ns-btn-ghost" type="submit">Sign out</button>
+        </form>
+
       </div>
+    </header>
 
-      <!-- User chip -->
-      {% if session.get("username") %}
-      <div class="ns-user">
-        <span class="ns-avatar">{{ session["username"][0]|upper }}</span>
-        <span class="ns-uname">{{ session["username"] }}</span>
+    <!-- ── Ticker tape ─────────────────────────────────────────────────────── -->
+    <div class="ns-tape-outer">
+      <div class="ns-tape-track" id="ns-tape-track">
+        <div class="ns-tape-inner" id="ns-tape-inner">
+          <span class="ns-tape-loading">Loading market data…</span>
+        </div>
       </div>
-      {% endif %}
-
-      <form method="post" action="{{ url_for('logout') }}" style="margin:0">
-        <button class="ns-btn-ghost" type="submit">Sign out</button>
-      </form>
     </div>
-  </div>
-</header>
 
-<!-- ════════════════════════════════════════ TICKER TAPE ════════════════════ -->
-<div class="ns-tape-outer">
-  <div class="ns-tape-track" id="ns-tape-track">
-    <div class="ns-tape-inner" id="ns-tape-inner">
-      <!-- JS populated -->
-      <span class="ns-tape-loading">Loading market data…</span>
-    </div>
-  </div>
-</div>
+    <!-- ── Page content ────────────────────────────────────────────────────── -->
+    <main class="ns-page">
+      {% block flash %}
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="flash-stack">
+            {% for category, message in messages %}
+              <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+      {% endblock %}
+      {% block content %}{% endblock %}
+    </main>
 
-{% endif %}{# logged_in #}
+  </div>{# /ns-main-area #}
 
-<!-- ════════════════════════════════════════ PAGE ════════════════════════════ -->
+</div>{# /ns-shell #}
+
+{% else %}
+
+<!-- ──── Not logged in (login page) ──────────────────────────────────────── -->
 <main class="ns-page">
-  {% block flash %}
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      <div class="flash-stack">
-        {% for category, message in messages %}
-          <div class="flash {{ category }}">{{ message }}</div>
-        {% endfor %}
-      </div>
-    {% endif %}
-  {% endwith %}
-  {% endblock %}
-  {% block content %}{% endblock %}
+  {{ self.flash() }}
+  {{ self.content() }}
 </main>
+
+{% endif %}
+
+<!-- Toast notification (global, aria-live for screen readers) -->
+<div id="ns-toast" class="toast" role="alert" aria-live="polite" aria-atomic="true"></div>
 
 {% if session.get("logged_in") %}
 <script>
-// ── Market status ────────────────────────────────────────────
+// ── Alpine sidebar component ─────────────────────────────────────────────
+function nsShell() {
+  return {
+    desk: localStorage.getItem('ns_sb') !== '0',
+    mob: false,
+    persist() { localStorage.setItem('ns_sb', this.desk ? '1' : '0'); }
+  };
+}
+
+// ── Global toast ─────────────────────────────────────────────────────────
+function showToast(msg, type = 'info') {
+  const el = document.getElementById('ns-toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = `toast toast--visible toast--${type}`;
+  clearTimeout(el._nsTimer);
+  el._nsTimer = setTimeout(() => { el.className = 'toast'; }, 4500);
+}
+
+// ── SocketIO real-time events ────────────────────────────────────────────
+if (typeof io !== 'undefined') {
+  try {
+    const _sock = io({ reconnectionDelay: 2000, reconnectionAttempts: 10 });
+    _sock.on('order_fill', d => {
+      const sym   = d.symbol || '';
+      const st    = d.status || '';
+      const qty   = d.filled_qty ? ` ${d.filled_qty}` : '';
+      const price = d.filled_avg_price ? ` @ $${parseFloat(d.filled_avg_price).toFixed(2)}` : '';
+      showToast(`${sym}${qty}${price} — ${st.toUpperCase()}`,
+                st === 'filled' ? 'success' : st === 'canceled' ? 'error' : 'info');
+    });
+    _sock.on('tradingview_signal', d => {
+      const sig = (d.signal || 'hold').toUpperCase();
+      showToast(`TradingView ${d.symbol}: ${sig} @ $${d.price || '—'}`, 'info');
+    });
+    _sock.on('connect_error', () => showToast('Live feed unavailable', 'error'));
+  } catch(e) {}
+}
+
+// ── Market status ────────────────────────────────────────────────────────
 async function refreshMarketStatus() {
   try {
     const r = await fetch('/api/live-metrics');
@@ -145,7 +332,7 @@ async function refreshMarketStatus() {
 refreshMarketStatus();
 setInterval(refreshMarketStatus, 60000);
 
-// ── Ticker tape ──────────────────────────────────────────────
+// ── Ticker tape ──────────────────────────────────────────────────────────
 async function loadTicker() {
   try {
     const r = await fetch('/api/ticker-strip');
@@ -155,26 +342,30 @@ async function loadTicker() {
     if (!inner || !data.tickers?.length) return;
     const html = data.tickers.map(t => {
       const up = t.change_pct >= 0;
+      const price = typeof t.price === 'number'
+        ? t.price.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
+        : t.price;
       return `<span class="ns-tick-item">
         <span class="ns-tick-sym">${t.symbol}</span>
-        <span class="ns-tick-price">${typeof t.price === 'number' ? t.price.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2}) : t.price}</span>
+        <span class="ns-tick-price">${price}</span>
         <span class="ns-tick-chg ${up ? 'tick-up' : 'tick-down'}">${up ? '▲' : '▼'} ${up ? '+' : ''}${t.change_pct.toFixed(2)}%</span>
       </span>`;
     }).join('');
-    inner.innerHTML = html + html; // duplicate for seamless CSS animation
+    inner.innerHTML = html + html;
   } catch(e) {}
 }
 loadTicker();
 setInterval(loadTicker, 30000);
 
-// ── Paper / Live toggle ──────────────────────────────────────
+// ── Paper / Live toggle ──────────────────────────────────────────────────
 async function confirmToggleMode() {
   const btn = document.getElementById('ns-mode-toggle');
   const isLive = btn.classList.contains('ns-toggle-live');
   const newMode = isLive ? 'paper' : 'live';
   if (newMode === 'live') {
     const ok = confirm(
-      '⚠ Switch to LIVE trading?\n\nThis will use REAL money from your brokerage account.\n\nAll future orders will be executed immediately.\n\nAre you absolutely sure?'
+      '⚠ Switch to LIVE trading?\n\nThis will use REAL money from your brokerage account.\n' +
+      'All future orders will be executed immediately.\n\nAre you absolutely sure?'
     );
     if (!ok) return;
   }
@@ -185,9 +376,8 @@ async function confirmToggleMode() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mode: newMode})
     });
-    if (r.ok) {
-      window.location.reload();
-    } else {
+    if (r.ok) { window.location.reload(); }
+    else {
       const err = await r.json();
       alert('Toggle failed: ' + (err.error || 'unknown error'));
       btn.disabled = false;

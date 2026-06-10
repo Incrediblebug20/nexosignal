@@ -25,6 +25,7 @@ let confidenceChart = null;
 let directionChart = null;
 let approvalChart = null;
 let portfolioChart = null;
+let sectorChart = null;
 
 function initCharts() {
   applyChartDefaults();
@@ -160,6 +161,32 @@ function initCharts() {
     });
   }
 
+  const secCanvas = document.getElementById("sectorChart");
+  if (secCanvas) {
+    sectorChart = new Chart(secCanvas, {
+      type: "doughnut",
+      data: {
+        labels: ["No positions"],
+        datasets: [{
+          data: [1],
+          backgroundColor: ["rgba(147,164,183,0.35)"],
+          borderColor: ["#344252"],
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: "65%",
+        plugins: {
+          legend: { position: "bottom", labels: { padding: 12, boxWidth: 11 } },
+        },
+      },
+    });
+    refreshSectorAllocation();
+    setInterval(refreshSectorAllocation, 60_000);
+  }
+
   // Initial load
   refreshCharts();
   // Auto-refresh every 30s
@@ -269,6 +296,180 @@ function updatePortfolioChart(data) {
   portfolioChart.data.datasets[0].data = values;
   portfolioChart.data.datasets[0].backgroundColor = labels.map((_, i) => palette[i % palette.length]);
   portfolioChart.update("none");
+}
+
+async function refreshSectorAllocation() {
+  if (!sectorChart) return;
+  try {
+    const res = await fetch("/api/research/sector-allocation");
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d.sectors || !d.sectors.length) return;
+    const COLORS = [
+      "rgba(18,184,134,0.75)", "rgba(138,180,255,0.75)", "rgba(245,159,0,0.75)",
+      "rgba(239,68,68,0.75)", "rgba(147,51,234,0.75)", "rgba(251,146,60,0.75)",
+      "rgba(147,164,183,0.45)",
+    ];
+    sectorChart.data.labels = d.sectors.map((s) => s.sector);
+    sectorChart.data.datasets[0].data = d.sectors.map((s) => s.value);
+    sectorChart.data.datasets[0].backgroundColor = d.sectors.map((_, i) => COLORS[i % COLORS.length]);
+    sectorChart.data.datasets[0].borderColor = d.sectors.map((_, i) =>
+      COLORS[i % COLORS.length].replace("0.75", "1").replace("0.45", "1")
+    );
+    sectorChart.update("none");
+  } catch (e) { /* silent */ }
+}
+
+// NexoSignal institutional dashboard panels
+async function refreshNexoSignalTelemetry() {
+  const predRoot = document.getElementById("ns-top-predictions");
+  const alphaRoot = document.getElementById("ns-alpha-picks");
+  if (!predRoot && !alphaRoot) return;
+  try {
+    const res = await fetch("/api/nexosignal/telemetry");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderTopPredictions(data.top_predictions || [], data);
+    renderAlphaPicks(data.alpha_picks || []);
+    renderPnlPanel(data.pnl || {});
+    renderExecutionHorizon(data.top_predictions || []);
+    const first = (data.top_predictions || [])[0];
+    if (first) refreshRiskRewardPanel(first.symbol);
+  } catch (err) {
+    console.warn("NexoSignal telemetry refresh failed:", err);
+  }
+}
+
+function renderTopPredictions(predictions, meta) {
+  const root = document.getElementById("ns-top-predictions");
+  if (!root) return;
+  const source = document.getElementById("ns-pred-source");
+  if (source) source.textContent = meta.stale_data ? "Degraded" : (meta.source || "Live");
+  if (!predictions.length) {
+    root.innerHTML = '<div class="empty">No ranked predictions available.</div>';
+    return;
+  }
+  root.innerHTML = predictions.map((p) => {
+    const dir   = String(p.predicted_direction || "hold").toLowerCase();
+    const price = Number(p.current_price || 0);
+    const atr   = Number(p.atr || price * 0.02);
+    const sl    = dir === "buy"  ? (price - atr).toFixed(2)         : (price + atr).toFixed(2);
+    const tp    = dir === "buy"  ? (price + atr * 5).toFixed(2)     : (price - atr * 5).toFixed(2);
+    const canExec = dir !== "hold" && typeof openExecuteSignal !== "undefined";
+    return `
+    <div class="ns-prediction-card ${p.trade_allowed ? "allowed" : "blocked"}">
+      <div class="ns-rank">#${p.rank}</div>
+      <div class="ns-pred-main">
+        <strong>${p.symbol}</strong>
+        <span>${p.asset_type} / ${p.strategy_match}</span>
+        <small>${p.reason || p.risk_warning || ""}</small>
+      </div>
+      <div class="ns-pred-metrics">
+        <b>$${price.toFixed(2)}</b>
+        <span class="${dir === "buy" ? "good" : dir === "sell" ? "bad" : "muted"}">${dir.toUpperCase()}</span>
+        <span>${Number(p.confluence_score || 0).toFixed(0)}/100</span>
+        <span>${Number(p.risk_reward_ratio || 0).toFixed(1)}:1</span>
+      </div>
+      <div class="ns-pred-status ${p.trade_allowed ? "good" : "bad"}">${p.trade_allowed ? "Paper eligible" : (p.blocked_reason || "Blocked")}</div>
+      ${canExec ? `<button class="exec-signal-btn" onclick="openExecuteSignal('${p.symbol}','${dir}','${price.toFixed(2)}','${sl}','${tp}')" aria-label="Execute signal for ${p.symbol}">⚡ Execute Signal</button>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function renderAlphaPicks(picks) {
+  const root = document.getElementById("ns-alpha-picks");
+  if (!root) return;
+  if (!picks.length) {
+    root.innerHTML = '<tr><td colspan="5" class="empty">No Alpha Picks available.</td></tr>';
+    return;
+  }
+  root.innerHTML = picks.map((p) => {
+    const dir   = String(p.direction || "hold").toLowerCase();
+    const price = Number(p.current_price || p.entry_price || 0);
+    const atr   = Number(p.atr || price * 0.02);
+    const sl    = dir === "buy"  ? (price - atr).toFixed(2) : (price + atr).toFixed(2);
+    const tp    = dir === "buy"  ? (price + atr * 5).toFixed(2) : (price - atr * 5).toFixed(2);
+    const canExec = dir !== "hold" && typeof openExecuteSignal !== "undefined";
+    return `
+    <tr>
+      <td><strong>${p.symbol}</strong><span class="muted"> ${dir}</span></td>
+      <td><div class="score-bar"><div class="score-fill" style="width:${Math.max(0,Math.min(100,Number(p.score||0)))}%"></div><span>${Number(p.score||0).toFixed(0)}</span></div></td>
+      <td>${atr.toFixed(2)}</td>
+      <td>${Number(p.relative_volume || 0).toFixed(2)}x</td>
+      <td>
+        ${canExec
+          ? `<button class="exec-signal-btn exec-signal-sm" onclick="openExecuteSignal('${p.symbol}','${dir}','${price.toFixed(2)}','${sl}','${tp}')" aria-label="Execute ${p.symbol}">⚡ Execute</button>`
+          : `<span class="ns-chip ${p.action_recommendation==="blocked"?"chip-bad":p.action_recommendation==="paper trade"?"chip-good":"chip-muted"}">${p.action_recommendation}</span>`
+        }
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function refreshRiskRewardPanel(symbol) {
+  const root = document.getElementById("ns-risk-reward");
+  if (!root || !symbol) return;
+  try {
+    const res = await fetch(`/api/nexosignal/risk-reward/${encodeURIComponent(symbol)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const rr = data.risk_reward || {};
+    root.innerHTML = `
+      <div><span>Entry</span><b>$${Number(rr.entry || 0).toFixed(2)}</b></div>
+      <div><span>Stop</span><b>$${Number(rr.stop_loss || 0).toFixed(2)}</b></div>
+      <div><span>Target</span><b>$${Number(rr.take_profit || 0).toFixed(2)}</b></div>
+      <div><span>R:R</span><b>${Number(rr.risk_reward_ratio || 0).toFixed(1)}:1</b></div>
+      <div><span>Dollar Risk</span><b>$${Number(rr.dollar_risk || 0).toFixed(2)}</b></div>
+      <div><span>Allowed</span><b class="${rr.trade_allowed ? "good" : "bad"}">${rr.trade_allowed ? "YES" : "NO"}</b></div>
+    `;
+  } catch (err) {
+    console.warn("Risk-reward panel refresh failed:", err);
+  }
+}
+
+function renderPnlPanel(pnl) {
+  const root = document.getElementById("ns-pnl-grid");
+  if (!root) return;
+  const money = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  root.innerHTML = `
+    <div><span>Open P/L</span><b class="${Number(pnl.open_pnl || 0) >= 0 ? "good" : "bad"}">${money(pnl.open_pnl)}</b></div>
+    <div><span>Realized</span><b>${money(pnl.realized_pnl)}</b></div>
+    <div><span>Daily</span><b class="${Number(pnl.daily_pnl || 0) >= 0 ? "good" : "bad"}">${money(pnl.daily_pnl)}</b></div>
+    <div><span>Win Rate</span><b>${Number(pnl.win_rate || 0).toFixed(1)}%</b></div>
+    <div><span>Best</span><b class="good">${money(pnl.best_trade)}</b></div>
+    <div><span>Worst</span><b class="bad">${money(pnl.worst_trade)}</b></div>
+  `;
+}
+
+function renderExecutionHorizon(predictions) {
+  const root = document.getElementById("ns-execution-horizon");
+  if (!root) return;
+  const active = predictions.slice(0, 5);
+  if (!active.length) {
+    root.innerHTML = '<div class="empty">No active automated trade horizon yet.</div>';
+    return;
+  }
+  root.innerHTML = active.map((p) => {
+    const stop = Number(p.target_stop_loss || 0);
+    const entry = Number(p.expected_entry || 0);
+    const target = Number(p.target_take_profit || 0);
+    const current = Number(p.current_price || entry);
+    const min = Math.min(stop, entry, target);
+    const max = Math.max(stop, entry, target);
+    const pct = Math.max(0, Math.min(100, ((current - min) / Math.max(max - min, 0.0001)) * 100));
+    return `
+      <div class="ns-horizon-row">
+        <strong>${p.symbol}</strong>
+        <div class="ns-horizon-rail">
+          <span class="ns-h-marker left">SL $${stop.toFixed(2)}</span>
+          <span class="ns-h-marker middle">Entry $${entry.toFixed(2)}</span>
+          <span class="ns-h-marker right">TP $${target.toFixed(2)}</span>
+          <span class="ns-h-pin" style="left:${pct}%"></span>
+        </div>
+        <span>${Number(p.risk_reward_ratio || 0).toFixed(1)}R</span>
+      </div>
+    `;
+  }).join("");
 }
 
 // ── AI Research Panel ──────────────────────────────────────────────────────
@@ -519,6 +720,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // Live metrics refresh every 60s
   refreshMetrics();
   setInterval(refreshMetrics, 60_000);
+  refreshNexoSignalTelemetry();
+  setInterval(refreshNexoSignalTelemetry, 5_000);
 
   bindAISymbolInput();
 
@@ -692,7 +895,8 @@ function showToast(message, type = "info") {
 }
 
 // Expose for inline onclick handlers
-window.runAIResearch       = runAIResearch;
-window.fetchRCPrice        = fetchRCPrice;
-window.calcRiskReward      = calcRiskReward;
-window.refreshIntelligence = refreshIntelligence;
+window.runAIResearch          = runAIResearch;
+window.fetchRCPrice           = fetchRCPrice;
+window.calcRiskReward         = calcRiskReward;
+window.refreshIntelligence    = refreshIntelligence;
+window.refreshSectorAllocation = refreshSectorAllocation;

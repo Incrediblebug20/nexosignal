@@ -25,6 +25,7 @@ from .events import emit_agent_event, register_agent_event_listener  # re-export
 from .restrictions import (
     RejectedOrder,
     calculate_position_risk,
+    check_autonomous_trade_requirements,
     check_correlation,
     check_order,
     check_portfolio_var,
@@ -344,6 +345,30 @@ class NexoSignalAgent(NexoSignalJobsMixin):
         stop_loss = pick.price - pick.atr
         take_profit = pick.price + (5 * pick.atr)
         rr = ((take_profit - pick.price) / max(pick.price - stop_loss, 0.0001)) if stop_loss < pick.price else 0
+        _market_open = (asset_type == "crypto") or self.broker.is_market_open()
+        guard = check_autonomous_trade_requirements(
+            confluence_score=pick.confluence_score,
+            risk_reward_ratio=rr,
+            atr=pick.atr,
+            liquidity_valid=getattr(pick, "liquidity_score", 0) >= 55,
+            stale_data=False,
+            buying_power_verified=settled_cash > 0,
+            market_open=_market_open,
+            supabase_healthy=bool(config.SUPABASE_DB_URL) or self.dry_run,
+            live_autonomous_mode=not self.dry_run,
+            circuit_breaker_active=self.circuit_breaker_active,
+        )
+        if not guard.allowed:
+            self._log(
+                f"NexoSignal Guard blocked {pick.symbol}: {guard.reason}",
+                "warning",
+                "execution_blocked",
+                pick.symbol,
+                {"strikes": guard.strikes, "circuit_breaker_active": guard.circuit_breaker_active},
+            )
+            if guard.circuit_breaker_active:
+                self.circuit_breaker_active = True
+            return
         var_1d, var_1d_pct = calculate_position_risk(pick.price, qty, pick.atr)
         try:
             proposed_positions = [{"var_1d": var_1d}]

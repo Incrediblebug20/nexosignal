@@ -89,6 +89,20 @@ def _init_db_uncached() -> None:
         conn.execute("alter table trade_events add column if not exists target_take_profit double precision")
         conn.execute("alter table trade_events add column if not exists current_risk_reward_ratio double precision")
         conn.execute("alter table trade_events add column if not exists execution_mode text not null default 'manual'")
+        conn.execute("alter table trade_events add column if not exists asset_type text")
+        conn.execute("alter table trade_events add column if not exists order_lifecycle_status text")
+        conn.execute("alter table trade_events add column if not exists entry_price double precision")
+        conn.execute("alter table trade_events add column if not exists exit_price double precision")
+        conn.execute("alter table trade_events add column if not exists realized_risk_reward_ratio double precision")
+        conn.execute("alter table trade_events add column if not exists realized_pnl double precision")
+        conn.execute("alter table trade_events add column if not exists unrealized_pnl double precision")
+        conn.execute("alter table trade_events add column if not exists position_size double precision")
+        conn.execute("alter table trade_events add column if not exists dollar_risk double precision")
+        conn.execute("alter table trade_events add column if not exists notional_exposure double precision")
+        conn.execute("alter table trade_events add column if not exists strategy_name text")
+        conn.execute("alter table trade_events add column if not exists circuit_breaker_triggered boolean not null default false")
+        conn.execute("alter table trade_events add column if not exists risk_check_passed boolean")
+        conn.execute("alter table trade_events add column if not exists risk_rejection_reason text")
         conn.execute(
             """
             do $$
@@ -153,6 +167,20 @@ def _init_db_uncached() -> None:
         )
         conn.execute("alter table signal_events add column if not exists confluence_score double precision")
         conn.execute("alter table signal_events add column if not exists order_book_imbalance double precision")
+        conn.execute("alter table signal_events add column if not exists asset_type text")
+        conn.execute("alter table signal_events add column if not exists strategy_name text")
+        conn.execute("alter table signal_events add column if not exists confidence_score double precision")
+        conn.execute("alter table signal_events add column if not exists expected_direction text")
+        conn.execute("alter table signal_events add column if not exists entry_price double precision")
+        conn.execute("alter table signal_events add column if not exists target_stop_loss double precision")
+        conn.execute("alter table signal_events add column if not exists target_take_profit double precision")
+        conn.execute("alter table signal_events add column if not exists risk_reward_ratio double precision")
+        conn.execute("alter table signal_events add column if not exists expected_r_multiple double precision")
+        conn.execute("alter table signal_events add column if not exists expected_value_score double precision")
+        conn.execute("alter table signal_events add column if not exists prediction_rank integer")
+        conn.execute("alter table signal_events add column if not exists signal_reason text")
+        conn.execute("alter table signal_events add column if not exists blocked_reason text")
+        conn.execute("alter table signal_events add column if not exists stale_data boolean not null default false")
         conn.execute(
             """
             create table if not exists agent_events (
@@ -304,6 +332,28 @@ def _init_db_uncached() -> None:
         )
         conn.execute("create index if not exists performance_events_created_at_idx on performance_events (created_at desc)")
         conn.execute("alter table performance_events enable row level security")
+
+        conn.execute(
+            """
+            create table if not exists daily_summaries (
+                id bigserial primary key,
+                trade_date date not null unique,
+                total_trades integer not null default 0,
+                wins integer not null default 0,
+                losses integer not null default 0,
+                win_loss_ratio double precision,
+                net_pnl double precision,
+                average_r double precision,
+                max_drawdown double precision,
+                circuit_breaker_triggered boolean not null default false,
+                top_prediction_symbol text,
+                notes text,
+                created_at timestamptz not null default now()
+            )
+            """
+        )
+        conn.execute("create index if not exists daily_summaries_trade_date_idx on daily_summaries (trade_date desc)")
+        conn.execute("alter table daily_summaries enable row level security")
 
 
 def _utc_now() -> str:
@@ -937,3 +987,424 @@ def list_performance_events(limit: int = 100) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# ── Autopilot: Strategy Portfolios ────────────────────────────────────────────
+
+def _init_strategy_portfolios(conn: Any) -> None:
+    conn.execute(
+        """
+        create table if not exists strategy_portfolios (
+            id bigserial primary key,
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now(),
+            name text not null,
+            description text,
+            symbols text not null default '',
+            strategy_type text not null default 'sma_crossover',
+            allocation_pct double precision not null default 0.1,
+            max_position_usd double precision not null default 1000.0,
+            max_drawdown_pct double precision not null default 0.05,
+            daily_loss_limit_usd double precision not null default 500.0,
+            min_confidence double precision not null default 70.0,
+            min_risk_reward double precision not null default 5.0,
+            autopilot_active boolean not null default false,
+            dry_run boolean not null default true,
+            total_trades integer not null default 0,
+            wins integer not null default 0,
+            losses integer not null default 0,
+            total_pnl double precision not null default 0.0
+        )
+        """
+    )
+    conn.execute(
+        "create index if not exists strategy_portfolios_created_at_idx "
+        "on strategy_portfolios (created_at desc)"
+    )
+    conn.execute("alter table strategy_portfolios enable row level security")
+
+
+@_no_storage(None)
+def create_strategy_portfolio(
+    *,
+    name: str,
+    description: str | None = None,
+    symbols: str = "",
+    strategy_type: str = "sma_crossover",
+    allocation_pct: float = 0.1,
+    max_position_usd: float = 1000.0,
+    max_drawdown_pct: float = 0.05,
+    daily_loss_limit_usd: float = 500.0,
+    min_confidence: float = 70.0,
+    min_risk_reward: float = 5.0,
+    autopilot_active: bool = False,
+    dry_run: bool = True,
+) -> int | None:
+    """Create a strategy portfolio and return its id."""
+    init_db()
+    with postgres_connect() as conn:
+        try:
+            row = conn.execute(
+                """
+                insert into strategy_portfolios
+                    (name, description, symbols, strategy_type,
+                     allocation_pct, max_position_usd, max_drawdown_pct, daily_loss_limit_usd,
+                     min_confidence, min_risk_reward, autopilot_active, dry_run)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    name, description, symbols, strategy_type,
+                    allocation_pct, max_position_usd, max_drawdown_pct, daily_loss_limit_usd,
+                    min_confidence, min_risk_reward, autopilot_active, dry_run,
+                ),
+            ).fetchone()
+            return row["id"] if row else None
+        except Exception:
+            _init_strategy_portfolios(conn)
+            row = conn.execute(
+                """
+                insert into strategy_portfolios
+                    (name, description, symbols, strategy_type,
+                     allocation_pct, max_position_usd, max_drawdown_pct, daily_loss_limit_usd,
+                     min_confidence, min_risk_reward, autopilot_active, dry_run)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    name, description, symbols, strategy_type,
+                    allocation_pct, max_position_usd, max_drawdown_pct, daily_loss_limit_usd,
+                    min_confidence, min_risk_reward, autopilot_active, dry_run,
+                ),
+            ).fetchone()
+            return row["id"] if row else None
+
+
+@_no_storage(list)
+def list_strategy_portfolios() -> list[dict[str, Any]]:
+    init_db()
+    with postgres_connect() as conn:
+        try:
+            rows = conn.execute(
+                "select * from strategy_portfolios order by created_at desc"
+            ).fetchall()
+        except Exception:
+            _init_strategy_portfolios(conn)
+            return []
+    return [dict(row) for row in rows]
+
+
+@_no_storage(None)
+def get_strategy_portfolio(portfolio_id: int) -> dict[str, Any] | None:
+    init_db()
+    with postgres_connect() as conn:
+        try:
+            row = conn.execute(
+                "select * from strategy_portfolios where id = %s", (portfolio_id,)
+            ).fetchone()
+        except Exception:
+            return None
+    return dict(row) if row else None
+
+
+@_no_storage(None)
+def update_strategy_portfolio(portfolio_id: int, **updates: Any) -> None:
+    """Update arbitrary fields on a strategy portfolio."""
+    allowed = {
+        "name", "description", "symbols", "strategy_type",
+        "allocation_pct", "max_position_usd", "max_drawdown_pct",
+        "daily_loss_limit_usd", "min_confidence", "min_risk_reward",
+        "autopilot_active", "dry_run",
+    }
+    safe_updates = {k: v for k, v in updates.items() if k in allowed}
+    if not safe_updates:
+        return
+    init_db()
+    set_clause = ", ".join(f"{k} = %s" for k in safe_updates)
+    values = list(safe_updates.values()) + [_utc_now(), portfolio_id]
+    with postgres_connect() as conn:
+        conn.execute(
+            f"update strategy_portfolios set {set_clause}, updated_at = %s where id = %s",
+            values,
+        )
+
+
+@_no_storage(None)
+def delete_strategy_portfolio(portfolio_id: int) -> None:
+    init_db()
+    with postgres_connect() as conn:
+        conn.execute("delete from strategy_portfolios where id = %s", (portfolio_id,))
+
+
+@_no_storage(None)
+def record_strategy_trade(
+    portfolio_id: int,
+    *,
+    win: bool,
+    pnl: float,
+) -> None:
+    """Increment trade stats on a strategy portfolio after an order fills."""
+    init_db()
+    with postgres_connect() as conn:
+        conn.execute(
+            """
+            update strategy_portfolios
+               set total_trades = total_trades + 1,
+                   wins         = wins + %s,
+                   losses       = losses + %s,
+                   total_pnl    = total_pnl + %s,
+                   updated_at   = %s
+             where id = %s
+            """,
+            (1 if win else 0, 0 if win else 1, pnl, _utc_now(), portfolio_id),
+        )
+
+
+# ── Lens Intelligence Reports Cache ──────────────────────────────────────────
+
+def _utc_now_plus(seconds: int) -> str:
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _init_lens_reports(conn: Any) -> None:
+    conn.execute(
+        """
+        create table if not exists lens_reports (
+            id bigserial primary key,
+            created_at timestamptz not null default now(),
+            symbol text not null,
+            report_type text not null default 'summary',
+            content_json jsonb not null default '{}',
+            conviction_score double precision,
+            expires_at timestamptz,
+            query text
+        )
+        """
+    )
+    conn.execute(
+        "create index if not exists lens_reports_symbol_type_idx "
+        "on lens_reports (symbol, report_type, created_at desc)"
+    )
+    conn.execute("alter table lens_reports enable row level security")
+
+
+@_no_storage(None)
+def cache_lens_report(
+    symbol: str,
+    report_type: str,
+    content_json: dict[str, Any],
+    conviction_score: float | None = None,
+    expires_in_secs: int = 3600,
+    query: str | None = None,
+) -> None:
+    init_db()
+    content_str = json.dumps(content_json, default=str)
+    expires_at = _utc_now_plus(expires_in_secs)
+    with postgres_connect() as conn:
+        try:
+            conn.execute(
+                """
+                insert into lens_reports
+                    (symbol, report_type, content_json, conviction_score, expires_at, query)
+                values (%s, %s, %s::jsonb, %s, %s, %s)
+                """,
+                (symbol.upper(), report_type, content_str, conviction_score, expires_at, query),
+            )
+        except Exception:
+            _init_lens_reports(conn)
+            conn.execute(
+                """
+                insert into lens_reports
+                    (symbol, report_type, content_json, conviction_score, expires_at, query)
+                values (%s, %s, %s::jsonb, %s, %s, %s)
+                """,
+                (symbol.upper(), report_type, content_str, conviction_score, expires_at, query),
+            )
+
+
+@_no_storage(None)
+def get_cached_lens_report(
+    symbol: str,
+    report_type: str = "summary",
+) -> dict[str, Any] | None:
+    init_db()
+    with postgres_connect() as conn:
+        row = conn.execute(
+            """
+            select * from lens_reports
+            where symbol = %s and report_type = %s
+              and (expires_at is null or expires_at > now())
+            order by created_at desc
+            limit 1
+            """,
+            (symbol.upper(), report_type),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("content_json"), str):
+        d["content_json"] = json.loads(d["content_json"])
+    return d
+
+
+# ── Backtest Run Results ──────────────────────────────────────────────────────
+
+def _init_backtest_runs(conn: Any) -> None:
+    conn.execute(
+        """
+        create table if not exists backtest_runs (
+            id bigserial primary key,
+            created_at timestamptz not null default now(),
+            run_id text not null unique,
+            symbols text not null,
+            strategy text not null,
+            params_json jsonb not null default '{}',
+            date_from text not null,
+            date_to text not null,
+            initial_capital double precision not null,
+            final_equity double precision,
+            total_return_pct double precision,
+            max_drawdown_pct double precision,
+            sharpe_ratio double precision,
+            win_rate double precision,
+            num_trades integer,
+            data_source text
+        )
+        """
+    )
+    conn.execute(
+        "create index if not exists backtest_runs_created_at_idx "
+        "on backtest_runs (created_at desc)"
+    )
+    conn.execute("alter table backtest_runs enable row level security")
+
+
+@_no_storage(None)
+def record_backtest_run(
+    *,
+    run_id: str,
+    symbols: str,
+    strategy: str,
+    params: dict[str, Any],
+    date_from: str,
+    date_to: str,
+    initial_capital: float,
+    final_equity: float | None = None,
+    total_return_pct: float | None = None,
+    max_drawdown_pct: float | None = None,
+    sharpe_ratio: float | None = None,
+    win_rate: float | None = None,
+    num_trades: int | None = None,
+    data_source: str | None = None,
+) -> None:
+    init_db()
+    params_str = json.dumps(params, default=str)
+    with postgres_connect() as conn:
+        try:
+            conn.execute(
+                """
+                insert into backtest_runs
+                    (run_id, symbols, strategy, params_json, date_from, date_to,
+                     initial_capital, final_equity, total_return_pct, max_drawdown_pct,
+                     sharpe_ratio, win_rate, num_trades, data_source)
+                values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (run_id) do nothing
+                """,
+                (run_id, symbols, strategy, params_str, date_from, date_to,
+                 initial_capital, final_equity, total_return_pct, max_drawdown_pct,
+                 sharpe_ratio, win_rate, num_trades, data_source),
+            )
+        except Exception:
+            _init_backtest_runs(conn)
+            conn.execute(
+                """
+                insert into backtest_runs
+                    (run_id, symbols, strategy, params_json, date_from, date_to,
+                     initial_capital, final_equity, total_return_pct, max_drawdown_pct,
+                     sharpe_ratio, win_rate, num_trades, data_source)
+                values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (run_id) do nothing
+                """,
+                (run_id, symbols, strategy, params_str, date_from, date_to,
+                 initial_capital, final_equity, total_return_pct, max_drawdown_pct,
+                 sharpe_ratio, win_rate, num_trades, data_source),
+            )
+
+
+@_no_storage(list)
+def list_backtest_runs(limit: int = 50) -> list[dict[str, Any]]:
+    init_db()
+    with postgres_connect() as conn:
+        try:
+            rows = conn.execute(
+                "select * from backtest_runs order by created_at desc limit %s",
+                (limit,),
+            ).fetchall()
+        except Exception:
+            conn.rollback()
+            _init_backtest_runs(conn)
+            rows = conn.execute(
+                "select * from backtest_runs order by created_at desc limit %s",
+                (limit,),
+            ).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        if isinstance(d.get("params_json"), str):
+            d["params_json"] = json.loads(d["params_json"])
+        result.append(d)
+    return result
+
+
+@_no_storage(list)
+def list_lens_reports(
+    limit: int = 50,
+    symbol: str | None = None,
+    report_type: str | None = None,
+) -> list[dict[str, Any]]:
+    init_db()
+    with postgres_connect() as conn:
+        try:
+            rows = _select_lens_reports(conn, limit, symbol, report_type)
+        except Exception:
+            conn.rollback()
+            _init_lens_reports(conn)
+            rows = _select_lens_reports(conn, limit, symbol, report_type)
+    result = []
+    for row in rows:
+        d = dict(row)
+        if isinstance(d.get("content_json"), str):
+            d["content_json"] = json.loads(d["content_json"])
+        result.append(d)
+    return result
+
+
+def _select_lens_reports(
+    conn: Any,
+    limit: int,
+    symbol: str | None,
+    report_type: str | None,
+) -> list[Any]:
+    if symbol and report_type:
+        return conn.execute(
+            "select * from lens_reports where symbol = %s and report_type = %s "
+            "order by created_at desc limit %s",
+            (symbol.upper(), report_type, limit),
+        ).fetchall()
+    if symbol:
+        return conn.execute(
+            "select * from lens_reports where symbol = %s "
+            "order by created_at desc limit %s",
+            (symbol.upper(), limit),
+        ).fetchall()
+    if report_type:
+        return conn.execute(
+            "select * from lens_reports where report_type = %s "
+            "order by created_at desc limit %s",
+            (report_type, limit),
+        ).fetchall()
+    return conn.execute(
+        "select * from lens_reports order by created_at desc limit %s",
+        (limit,),
+    ).fetchall()

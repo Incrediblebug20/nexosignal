@@ -18,6 +18,7 @@ from typing import Any, Literal
 import aiohttp
 
 from . import config
+from .strategy import asset_type_for_symbol
 
 
 Signal = Literal["buy", "sell", "hold"]
@@ -61,6 +62,88 @@ class SignalDecision:
     approved: bool
     reason: str
     indicators: IndicatorSnapshot
+
+
+@dataclass(frozen=True)
+class StrategySignal:
+    strategy_name: str
+    direction: Signal
+    confidence_score: float
+    confluence_score: float
+    entry_price: float
+    target_stop_loss: float
+    target_take_profit: float
+    risk_reward_ratio: float
+    expected_r_multiple: float
+    expected_value_score: float
+    reason: str
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RiskRewardAnalysis:
+    symbol: str
+    asset_type: str
+    direction: Signal
+    entry: float
+    invalidation_level: float
+    stop_loss: float
+    take_profit: float
+    break_even_trigger: float
+    atr: float
+    risk_per_share: float
+    reward_per_share: float
+    risk_reward_ratio: float
+    dollar_risk: float
+    notional_exposure: float
+    buying_power_required: float
+    position_size: float
+    expected_r_multiple: float
+    expected_value_score: float
+    drawdown_exposure: float
+    volatility_adjusted_confidence: float
+    liquidity_adjusted_confidence: float
+    trade_allowed: bool
+    blocked_reason: str | None
+
+
+@dataclass(frozen=True)
+class DailyPrediction:
+    rank: int
+    symbol: str
+    asset_type: str
+    current_price: float
+    predicted_direction: Signal
+    confidence_score: float
+    confluence_score: float
+    strategy_match: str
+    expected_entry: float
+    target_stop_loss: float
+    target_take_profit: float
+    risk_reward_ratio: float
+    expected_r_multiple: float
+    expected_value_score: float
+    invalidation_level: float
+    reason: str
+    risk_warning: str
+    trade_allowed: bool
+    blocked_reason: str | None
+
+
+@dataclass(frozen=True)
+class AlphaPick:
+    symbol: str
+    asset_type: str
+    price: float
+    score: float
+    confluence_score: float
+    confidence_score: float
+    atr: float
+    vwap_status: str
+    relative_volume: float
+    direction: Signal
+    action_recommendation: str
+    rejection_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -134,6 +217,369 @@ def analyze_signal(
         approved=approved,
         reason="; ".join(reasons),
         indicators=indicators,
+    )
+
+
+def evaluate_strategy_suite(symbol: str, bars: list[dict]) -> list[StrategySignal]:
+    """Run deterministic strategy family and return structured strategy outputs."""
+    indicators = compute_indicators(bars)
+    return [
+        _trend_momentum_signal(indicators),
+        _mean_reversion_signal(indicators),
+        _breakout_signal(bars, indicators),
+        _volatility_expansion_signal(bars, indicators),
+        _institutional_risk_reward_signal(symbol, bars, indicators),
+    ]
+
+
+def select_best_strategy_signal(symbol: str, bars: list[dict]) -> StrategySignal:
+    candidates = evaluate_strategy_suite(symbol, bars)
+    return sorted(
+        candidates,
+        key=lambda item: (item.blocked_reason is None, item.expected_value_score, item.confluence_score),
+        reverse=True,
+    )[0]
+
+
+def analyze_risk_reward(
+    symbol: str,
+    bars: list[dict],
+    direction: Signal = "buy",
+    max_risk_per_trade: float = 100.0,
+    buying_power: float | None = None,
+    market_open: bool = True,
+    circuit_breaker_active: bool = False,
+    stale_data: bool = False,
+) -> RiskRewardAnalysis:
+    indicators = compute_indicators(bars)
+    entry = indicators.close
+    atr = indicators.atr
+    blocked: list[str] = []
+    if direction not in {"buy", "sell"}:
+        blocked.append("no directional signal")
+    if atr <= 0:
+        blocked.append("ATR missing or zero")
+    if stale_data:
+        blocked.append("market data is stale")
+    if not market_open and asset_type_for_symbol(symbol) != "crypto":
+        blocked.append("market is closed")
+    if circuit_breaker_active:
+        blocked.append("circuit breaker active")
+
+    if direction == "sell":
+        stop_loss = entry + atr
+        take_profit = entry - (5 * atr)
+        break_even_trigger = entry - (2 * atr)
+        invalidation = stop_loss
+        risk_per_share = max(stop_loss - entry, 0.0)
+        reward_per_share = max(entry - take_profit, 0.0)
+    else:
+        stop_loss = entry - atr
+        take_profit = entry + (5 * atr)
+        break_even_trigger = entry + (2 * atr)
+        invalidation = stop_loss
+        risk_per_share = max(entry - stop_loss, 0.0)
+        reward_per_share = max(take_profit - entry, 0.0)
+
+    rr = reward_per_share / max(risk_per_share, 0.0001)
+    if rr + 1e-6 < config.AI_MIN_RISK_REWARD_RATIO:
+        blocked.append(f"risk reward below {config.AI_MIN_RISK_REWARD_RATIO:.1f}:1")
+
+    size_by_risk = math.floor(max_risk_per_trade / max(risk_per_share, 0.0001)) if risk_per_share > 0 else 0
+    if buying_power is not None:
+        size_by_cash = math.floor(max(buying_power, 0.0) / max(entry, 0.0001))
+        position_size = max(0, min(size_by_risk, size_by_cash))
+        if position_size <= 0:
+            blocked.append("buying power unavailable")
+    else:
+        position_size = max(0, size_by_risk)
+
+    notional = position_size * entry
+    dollar_risk = position_size * risk_per_share
+    expected_r = (rr * (indicators.volume_ratio / max(indicators.volume_ratio + 1.0, 1.0))) - 1.0
+    ev = max(0.0, min(100.0, 50.0 + expected_r * 10.0))
+    volatility_adjusted = max(0.0, min(100.0, 100.0 - (atr / max(entry, 0.0001)) * 900.0))
+    liquidity_adjusted = max(0.0, min(100.0, 55.0 + indicators.volume_ratio * 20.0 - abs(indicators.volume_z) * 2.0))
+
+    return RiskRewardAnalysis(
+        symbol=symbol.upper(),
+        asset_type=asset_type_for_symbol(symbol),
+        direction=direction,
+        entry=round(entry, 4),
+        invalidation_level=round(invalidation, 4),
+        stop_loss=round(stop_loss, 4),
+        take_profit=round(take_profit, 4),
+        break_even_trigger=round(break_even_trigger, 4),
+        atr=round(atr, 4),
+        risk_per_share=round(risk_per_share, 4),
+        reward_per_share=round(reward_per_share, 4),
+        risk_reward_ratio=round(rr, 2),
+        dollar_risk=round(dollar_risk, 2),
+        notional_exposure=round(notional, 2),
+        buying_power_required=round(notional, 2),
+        position_size=float(position_size),
+        expected_r_multiple=round(expected_r, 2),
+        expected_value_score=round(ev, 2),
+        drawdown_exposure=round((dollar_risk / max(notional, 0.0001)) if notional else 0.0, 4),
+        volatility_adjusted_confidence=round(volatility_adjusted, 2),
+        liquidity_adjusted_confidence=round(liquidity_adjusted, 2),
+        trade_allowed=not blocked,
+        blocked_reason="; ".join(dict.fromkeys(blocked)) if blocked else None,
+    )
+
+
+def build_ranked_predictions(
+    symbol_bars: dict[str, list[dict]],
+    *,
+    top_n: int = 3,
+    market_open: bool = True,
+    circuit_breaker_active: bool = False,
+) -> list[DailyPrediction]:
+    ranked: list[tuple[float, str, StrategySignal, RiskRewardAnalysis]] = []
+    for symbol, bars in symbol_bars.items():
+        if len(bars) < 20:
+            continue
+        best = select_best_strategy_signal(symbol, bars)
+        rr = analyze_risk_reward(
+            symbol,
+            bars,
+            best.direction,
+            market_open=market_open,
+            circuit_breaker_active=circuit_breaker_active,
+        )
+        indicators = compute_indicators(bars)
+        score = (
+            best.confluence_score * 0.38
+            + best.confidence_score * 0.22
+            + min(100.0, indicators.volume_ratio * 45.0) * 0.15
+            + min(100.0, rr.risk_reward_ratio * 12.5) * 0.15
+            + rr.expected_value_score * 0.10
+        )
+        if best.direction == "hold":
+            score *= 0.55
+        ranked.append((score, symbol, best, rr))
+
+    output: list[DailyPrediction] = []
+    for rank, (score, symbol, best, rr) in enumerate(sorted(ranked, key=lambda row: row[0], reverse=True)[:top_n], start=1):
+        blocked = rr.blocked_reason or best.blocked_reason
+        allowed = score >= config.SIGNAL_MIN_CONFIDENCE and rr.trade_allowed and best.blocked_reason is None
+        output.append(
+            DailyPrediction(
+                rank=rank,
+                symbol=symbol.upper(),
+                asset_type=asset_type_for_symbol(symbol),
+                current_price=rr.entry,
+                predicted_direction=best.direction,
+                confidence_score=round(best.confidence_score, 2),
+                confluence_score=round(max(best.confluence_score, score), 2),
+                strategy_match=best.strategy_name,
+                expected_entry=rr.entry,
+                target_stop_loss=rr.stop_loss,
+                target_take_profit=rr.take_profit,
+                risk_reward_ratio=rr.risk_reward_ratio,
+                expected_r_multiple=rr.expected_r_multiple,
+                expected_value_score=round(max(best.expected_value_score, rr.expected_value_score), 2),
+                invalidation_level=rr.invalidation_level,
+                reason=best.reason,
+                risk_warning="Probabilistic ranking only. Not a guaranteed prediction.",
+                trade_allowed=allowed,
+                blocked_reason=None if allowed else (blocked or "score below autonomous threshold"),
+            )
+        )
+    return output
+
+
+def build_alpha_picks(symbol_bars: dict[str, list[dict]], top_n: int = 5) -> list[AlphaPick]:
+    picks: list[AlphaPick] = []
+    for symbol, bars in symbol_bars.items():
+        if len(bars) < 20:
+            continue
+        indicators = compute_indicators(bars)
+        best = select_best_strategy_signal(symbol, bars)
+        rr = analyze_risk_reward(symbol, bars, best.direction)
+        above_vwap = indicators.close >= indicators.vwap
+        score = round((best.confluence_score * 0.55) + (best.confidence_score * 0.25) + (rr.expected_value_score * 0.20), 2)
+        blocked = best.blocked_reason or rr.blocked_reason
+        if blocked:
+            action = "blocked"
+        elif score >= config.SIGNAL_MIN_CONFIDENCE and rr.risk_reward_ratio >= config.AI_MIN_RISK_REWARD_RATIO:
+            action = "paper trade"
+        else:
+            action = "watch"
+        picks.append(
+            AlphaPick(
+                symbol=symbol.upper(),
+                asset_type=asset_type_for_symbol(symbol),
+                price=round(indicators.close, 4),
+                score=score,
+                confluence_score=round(best.confluence_score, 2),
+                confidence_score=round(best.confidence_score, 2),
+                atr=round(indicators.atr, 4),
+                vwap_status="above" if above_vwap else "below",
+                relative_volume=round(indicators.volume_ratio, 2),
+                direction=best.direction,
+                action_recommendation=action,
+                rejection_reason=blocked,
+            )
+        )
+    return sorted(picks, key=lambda item: item.score, reverse=True)[:top_n]
+
+
+def _strategy_result(
+    name: str,
+    direction: Signal,
+    confidence: float,
+    confluence: float,
+    indicators: IndicatorSnapshot,
+    reason: str,
+    blocked: str | None = None,
+) -> StrategySignal:
+    rr = analyze_risk_reward_from_indicators(indicators, direction)
+    if blocked is None and direction == "hold":
+        blocked = "no executable directional edge"
+    if blocked is None and rr["risk_reward_ratio"] + 1e-6 < config.AI_MIN_RISK_REWARD_RATIO:
+        blocked = f"risk reward below {config.AI_MIN_RISK_REWARD_RATIO:.1f}:1"
+    return StrategySignal(
+        strategy_name=name,
+        direction=direction,
+        confidence_score=round(max(0.0, min(100.0, confidence)), 2),
+        confluence_score=round(max(0.0, min(100.0, confluence)), 2),
+        entry_price=rr["entry"],
+        target_stop_loss=rr["stop_loss"],
+        target_take_profit=rr["take_profit"],
+        risk_reward_ratio=rr["risk_reward_ratio"],
+        expected_r_multiple=rr["expected_r_multiple"],
+        expected_value_score=rr["expected_value_score"],
+        reason=reason,
+        blocked_reason=blocked,
+    )
+
+
+def analyze_risk_reward_from_indicators(indicators: IndicatorSnapshot, direction: Signal) -> dict[str, float]:
+    entry = indicators.close
+    atr = indicators.atr
+    if atr <= 0:
+        return {
+            "entry": round(entry, 4),
+            "stop_loss": round(entry, 4),
+            "take_profit": round(entry, 4),
+            "risk_reward_ratio": 0.0,
+            "expected_r_multiple": -1.0,
+            "expected_value_score": 0.0,
+        }
+    if direction == "sell":
+        stop = entry + atr
+        target = entry - (5 * atr)
+        risk = stop - entry
+        reward = entry - target
+    else:
+        stop = entry - atr
+        target = entry + (5 * atr)
+        risk = entry - stop
+        reward = target - entry
+    rr = reward / max(risk, 0.0001) if direction in {"buy", "sell"} else 0.0
+    probability = max(0.05, min(0.95, (indicators.volume_ratio / 3.0 + (50.0 - abs(indicators.rsi - 50.0)) / 50.0) / 2.0))
+    expected_r = (probability * rr) - (1.0 - probability)
+    return {
+        "entry": round(entry, 4),
+        "stop_loss": round(stop, 4),
+        "take_profit": round(target, 4),
+        "risk_reward_ratio": round(rr, 2),
+        "expected_r_multiple": round(expected_r, 2),
+        "expected_value_score": round(max(0.0, min(100.0, 50.0 + expected_r * 10.0)), 2),
+    }
+
+
+def _trend_momentum_signal(i: IndicatorSnapshot) -> StrategySignal:
+    score = 45.0
+    reasons: list[str] = []
+    direction: Signal = "hold"
+    if i.close > i.sma_slow and i.ema20 > i.ema50 and i.macd_histogram > 0:
+        direction = "buy"
+        score += 32
+        reasons.append("price above slow SMA with EMA and MACD confirmation")
+    elif i.close < i.sma_slow and i.ema20 < i.ema50 and i.macd_histogram < 0:
+        direction = "sell"
+        score += 30
+        reasons.append("price below slow SMA with bearish EMA and MACD confirmation")
+    if i.volume_ratio >= 1.2:
+        score += 10
+        reasons.append("relative volume confirms momentum")
+    if 42 <= i.rsi <= 68:
+        score += 8
+        reasons.append("RSI supports trend continuation")
+    return _strategy_result("Trend Momentum Strategy", direction, score, score, i, "; ".join(reasons) or "trend not aligned")
+
+
+def _mean_reversion_signal(i: IndicatorSnapshot) -> StrategySignal:
+    vwap_dev = (i.close - i.vwap) / max(i.vwap, 0.0001)
+    score = 50.0
+    direction: Signal = "hold"
+    reason = "price is not stretched enough for mean reversion"
+    if i.rsi <= 32 and vwap_dev < -0.01:
+        direction = "buy"
+        score += min(35.0, abs(vwap_dev) * 1200.0)
+        reason = "oversold RSI with price below VWAP"
+    elif i.rsi >= 72 and vwap_dev > 0.01:
+        direction = "sell"
+        score += min(35.0, abs(vwap_dev) * 1200.0)
+        reason = "overbought RSI with price above VWAP"
+    return _strategy_result("Mean Reversion Strategy", direction, score, score, i, reason)
+
+
+def _breakout_signal(bars: list[dict], i: IndicatorSnapshot) -> StrategySignal:
+    highs = [float(b.get("h", b["c"])) for b in bars[-21:-1]]
+    lows = [float(b.get("l", b["c"])) for b in bars[-21:-1]]
+    resistance = max(highs) if highs else i.close
+    support = min(lows) if lows else i.close
+    direction: Signal = "hold"
+    score = 48.0
+    reason = "no confirmed support or resistance break"
+    if i.close > resistance and i.volume_ratio >= 1.1:
+        direction = "buy"
+        score = 76.0 + min(18.0, (i.volume_ratio - 1.0) * 10.0)
+        reason = "price broke above 20-bar resistance with volume"
+    elif i.close < support and i.volume_ratio >= 1.1:
+        direction = "sell"
+        score = 74.0 + min(18.0, (i.volume_ratio - 1.0) * 10.0)
+        reason = "price broke below 20-bar support with volume"
+    return _strategy_result("Breakout Strategy", direction, score, score, i, reason)
+
+
+def _volatility_expansion_signal(bars: list[dict], i: IndicatorSnapshot) -> StrategySignal:
+    atr_now = i.atr
+    prev_atrs = []
+    for idx in range(16, len(bars) - 1):
+        prev_atrs.append(compute_atr(bars[max(0, idx - 15):idx + 1]))
+    atr_avg = mean(prev_atrs[-20:]) if prev_atrs else atr_now
+    expanding = atr_now > atr_avg * 1.15 if atr_avg else False
+    direction: Signal = "hold"
+    score = 45.0
+    reason = "volatility is not expanding"
+    if expanding and i.candle_direction == "bullish" and i.close >= i.vwap:
+        direction = "buy"
+        score = 72.0 + min(18.0, i.candle_body_pct * 20.0)
+        reason = "ATR expansion with bullish candle above VWAP"
+    elif expanding and i.candle_direction == "bearish" and i.close <= i.vwap:
+        direction = "sell"
+        score = 72.0 + min(18.0, i.candle_body_pct * 20.0)
+        reason = "ATR expansion with bearish candle below VWAP"
+    return _strategy_result("Volatility Expansion Strategy", direction, score, score, i, reason)
+
+
+def _institutional_risk_reward_signal(symbol: str, bars: list[dict], i: IndicatorSnapshot) -> StrategySignal:
+    direction: Signal = "buy" if i.trend == "up" else "sell" if i.trend == "down" else "hold"
+    rr = analyze_risk_reward(symbol, bars, direction)
+    score = min(100.0, (rr.risk_reward_ratio * 11.0) + (rr.liquidity_adjusted_confidence * 0.25))
+    reason = f"ATR-derived 5:1 setup with {i.trend} market structure"
+    return _strategy_result(
+        "Institutional Risk/Reward Strategy",
+        direction,
+        score,
+        score,
+        i,
+        reason,
+        rr.blocked_reason,
     )
 
 

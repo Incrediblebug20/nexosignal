@@ -111,7 +111,7 @@
         <div class="execution-tape" id="execution-tape">
           {% for t in trades[:8] %}
             <div class="tape-row">
-              <span class="tape-time">{{ t.created_at[:19].replace("T", " ") }}</span>
+              <span class="tape-time">{{ (t.created_at|string)[:19].replace("T", " ") }}</span>
               <strong>{{ t.symbol }}</strong>
               <span class="{{ 'good' if t.side == 'buy' else 'bad' }}">{{ t.side|upper }}</span>
               <span>{{ t.qty }}</span>
@@ -647,7 +647,7 @@
                 <span class="muted" style="font-size:11px">{{ "{:,.0f}".format(ins.shares) }} shares</span>
               {% endif %}
             </div>
-            <div class="muted" style="font-size:11px">{{ ins.filed_at[:10] if ins.filed_at else '' }}</div>
+            <div class="muted" style="font-size:11px">{{ (ins.filed_at|string)[:10] if ins.filed_at else '' }}</div>
           </div>
         {% else %}
           <div class="empty">No insider filings yet — Lens parses SEC EDGAR weekday 6 PM ET</div>
@@ -979,7 +979,7 @@
       <tbody>
         {% for t in trades %}
           <tr>
-            <td class="mono">{{ t.created_at[:19].replace("T", " ") }}</td>
+            <td class="mono">{{ (t.created_at|string)[:19].replace("T", " ") }}</td>
             <td>{{ t.source }}</td>
             <td><strong>{{ t.symbol }}</strong></td>
             <td class="{{ 'good' if t.side == 'buy' else 'bad' }}">{{ t.side|upper }}</td>

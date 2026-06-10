@@ -2,7 +2,8 @@ import logging
 import threading
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+import requests
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import wraps
@@ -14,8 +15,15 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from trading_agent import config
 from trading_agent.agent import NexoSignalAgent, register_agent_event_listener
 from trading_agent.broker import AlpacaBroker, BrokerError
-from trading_agent.restrictions import RejectedOrder
+from trading_agent.restrictions import RejectedOrder, break_even_stop_update, get_tracker
 from trading_agent.runtime import AgentRuntime
+from trading_agent.signal_engine import (
+    analyze_risk_reward,
+    build_alpha_picks,
+    build_ranked_predictions,
+    compute_indicators,
+    evaluate_strategy_suite,
+)
 from trading_agent.storage import (
     init_db,
     latest_wallet_connection,
@@ -34,6 +42,17 @@ from trading_agent.storage import (
     list_insider_activity,
     list_risk_metrics,
     list_performance_events,
+    create_strategy_portfolio,
+    list_strategy_portfolios,
+    get_strategy_portfolio,
+    update_strategy_portfolio,
+    delete_strategy_portfolio,
+    record_strategy_trade,
+    cache_lens_report,
+    get_cached_lens_report,
+    list_lens_reports,
+    record_backtest_run,
+    list_backtest_runs,
 )
 from trading_agent.strategy import STRATEGIES, is_supported_crypto, normalize_symbol
 
@@ -155,6 +174,94 @@ def current_agent_status() -> dict:
         "running": False, "configured": False, "scheduler_running": False,
         "scheduler_jobs": [], "symbols": [], "strategy": None,
         "qty": None, "interval": None, "dry_run": None, "log": [], "errors": [],
+    }
+
+
+_nexosignal_cache: dict[str, object] = {"ts": 0.0, "symbol_bars": {}, "source": "cold"}
+_NEXOSIGNAL_TTL = 120
+
+
+def _fallback_bars(symbol: str, price: float | None = None, count: int = 80) -> list[dict]:
+    """Deterministic fallback bars for offline dashboard rendering."""
+    base = float(price or 100.0)
+    bars: list[dict] = []
+    for idx in range(count):
+        drift = (idx - count / 2) * 0.015
+        wave = ((idx % 9) - 4) * 0.12
+        close = max(0.5, base + drift + wave)
+        open_ = close - 0.08
+        high = close + 0.35
+        low = max(0.01, close - 0.35)
+        bars.append({"o": open_, "h": high, "l": low, "c": close, "v": 2_000_000 + idx * 3_000})
+    return bars
+
+
+def _load_symbol_bars(symbols: list[str] | None = None, limit: int = 80) -> tuple[dict[str, list[dict]], str, bool, str | None]:
+    now = time.time()
+    if _nexosignal_cache["symbol_bars"] and now - float(_nexosignal_cache["ts"]) < _NEXOSIGNAL_TTL:
+        return dict(_nexosignal_cache["symbol_bars"]), str(_nexosignal_cache["source"]), False, None
+
+    selected = symbols or config.DEFAULT_DASHBOARD_SYMBOLS or ["AAPL", "MSFT", "SPY", "QQQ", "BTC/USD", "ETH/USD"]
+    selected = [normalize_symbol(s) for s in selected[:20]]
+    bars_by_symbol: dict[str, list[dict]] = {}
+    source = "alpaca"
+    stale = False
+    reason = None
+    broker = get_broker()
+    if broker:
+        for symbol in selected:
+            try:
+                bars = broker.get_bars(symbol, timeframe="1Day", limit=limit)
+                if bars:
+                    bars_by_symbol[symbol] = bars
+                    continue
+            except Exception as exc:
+                logger.debug("bar fetch failed for %s: %s", symbol, exc)
+    if not bars_by_symbol:
+        source = "fallback"
+        stale = True
+        reason = "live market data unavailable; deterministic fallback used"
+        for symbol in selected:
+            quote = _market_quote(symbol)
+            bars_by_symbol[symbol] = _fallback_bars(symbol, quote.get("price") if quote else None, limit)
+
+    _nexosignal_cache["symbol_bars"] = bars_by_symbol
+    _nexosignal_cache["source"] = source
+    _nexosignal_cache["ts"] = now
+    return bars_by_symbol, source, stale, reason
+
+
+def _safe_account_snapshot() -> tuple[dict, list[dict], dict | None]:
+    broker = get_broker()
+    if not broker:
+        return {}, [], None
+    try:
+        return broker.get_account(), broker.get_positions(), broker.get_clock()
+    except Exception:
+        return {}, [], None
+
+
+def _pnl_payload() -> dict:
+    account, positions, _ = _safe_account_snapshot()
+    trades = list_trade_events(500)
+    unrealized = sum(float(p.get("unrealized_pl") or 0) for p in positions)
+    realized = sum(float(t.get("realized_pnl") or 0) for t in trades if t.get("realized_pnl") is not None)
+    wins = sum(1 for t in trades if float(t.get("realized_pnl") or 0) > 0)
+    losses = sum(1 for t in trades if float(t.get("realized_pnl") or 0) < 0)
+    closed = wins + losses
+    pnl_values = [float(t.get("realized_pnl") or 0) for t in trades]
+    return {
+        "portfolio_value": float(account.get("portfolio_value") or 0),
+        "open_pnl": round(unrealized, 2),
+        "realized_pnl": round(realized, 2),
+        "daily_pnl": round(unrealized + realized, 2),
+        "win_loss_ratio": round(wins / max(losses, 1), 2) if closed else 0,
+        "win_rate": round((wins / closed) * 100, 2) if closed else 0,
+        "average_r": round(sum(float(t.get("realized_risk_reward_ratio") or 0) for t in trades) / max(closed, 1), 2) if closed else 0,
+        "max_drawdown": round(min(pnl_values), 2) if pnl_values else 0,
+        "best_trade": round(max(pnl_values), 2) if pnl_values else 0,
+        "worst_trade": round(min(pnl_values), 2) if pnl_values else 0,
+        "current_exposure": round(sum(float(p.get("market_value") or 0) for p in positions), 2),
     }
 
 
@@ -297,6 +404,485 @@ def trade():
         prefill_symbol=request.args.get("symbol", ""),
         prefill_side=request.args.get("side", "buy"),
     )
+
+
+@app.get("/health")
+def health():
+    return jsonify({
+        "ok": True,
+        "service": "NexoSignal",
+        "mode": config.TRADING_MODE,
+        "paper_default": config.ALPACA_PAPER,
+        "live_trading_enabled": config.LIVE_TRADING,
+        "autonomous_trading_enabled": config.AUTONOMOUS_TRADING,
+        "storage_enabled": bool(config.SUPABASE_DB_URL),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.get("/system-health")
+@login_required
+def system_health_page():
+    tracker = get_tracker()
+    return render_template(
+        "health.html",
+        config=config,
+        status={
+            "service": "NexoSignal",
+            "mode": config.TRADING_MODE,
+            "paper_default": config.ALPACA_PAPER,
+            "live_trading_enabled": config.LIVE_TRADING,
+            "autonomous_trading_enabled": config.AUTONOMOUS_TRADING,
+            "manual_approval_required": config.REQUIRE_MANUAL_APPROVAL,
+            "storage_enabled": bool(config.SUPABASE_DB_URL),
+            "telegram_enabled": bool(config.TELEGRAM_TOKEN and config.TELEGRAM_CHAT_ID),
+            "local_llm_enabled": config.LOCAL_LLM_ENABLED,
+            "circuit_breaker_active": tracker.circuit_breaker_active,
+            "circuit_breaker_reason": tracker.circuit_breaker_reason,
+            "guard_strikes": tracker.guard_strikes,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+@app.get("/api/nexosignal/status")
+@login_required
+def api_nexosignal_status():
+    tracker = get_tracker()
+    status = current_agent_status()
+    return jsonify({
+        "status": "ok",
+        "agent": status,
+        "safety": {
+            "paper_mode": config.ALPACA_PAPER or config.TRADING_MODE == "paper",
+            "live_trading_enabled": config.LIVE_TRADING,
+            "autonomous_trading_enabled": config.AUTONOMOUS_TRADING,
+            "manual_approval_required": config.REQUIRE_MANUAL_APPROVAL,
+            "min_confidence": config.SIGNAL_MIN_CONFIDENCE,
+            "min_risk_reward": config.MIN_RISK_REWARD_RATIO,
+            "circuit_breaker_active": tracker.circuit_breaker_active or bool(status.get("circuit_breaker_active")),
+            "circuit_breaker_reason": tracker.circuit_breaker_reason,
+            "guard_strikes": tracker.guard_strikes,
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.get("/api/nexosignal/top-predictions")
+@login_required
+def api_nexosignal_top_predictions():
+    bars, source, stale, reason = _load_symbol_bars()
+    _, _, clock = _safe_account_snapshot()
+    market_open = bool(clock and clock.get("is_open", False))
+    preds = build_ranked_predictions(
+        bars,
+        top_n=3,
+        market_open=market_open,
+        circuit_breaker_active=get_tracker().circuit_breaker_active,
+    )
+    return jsonify({
+        "status": "ok" if not stale else "degraded",
+        "stale_data": stale,
+        "reason": reason,
+        "source": source,
+        "predictions": [asdict(p) for p in preds],
+    })
+
+
+@app.get("/api/nexosignal/alpha-picks")
+@login_required
+def api_nexosignal_alpha_picks():
+    bars, source, stale, reason = _load_symbol_bars()
+    picks = build_alpha_picks(bars, top_n=5)
+    return jsonify({
+        "status": "ok" if not stale else "degraded",
+        "stale_data": stale,
+        "reason": reason,
+        "source": source,
+        "alpha_picks": [asdict(p) for p in picks],
+    })
+
+
+@app.get("/api/nexosignal/risk-reward/<symbol>")
+@login_required
+def api_nexosignal_risk_reward(symbol: str):
+    normalized = normalize_symbol(symbol)
+    bars, source, stale, reason = _load_symbol_bars([normalized])
+    item = bars.get(normalized)
+    if not item:
+        return jsonify({"status": "error", "stale_data": True, "reason": f"No bars for {normalized}"}), 404
+    account, _, clock = _safe_account_snapshot()
+    suite = evaluate_strategy_suite(normalized, item)
+    best = sorted(suite, key=lambda s: (s.blocked_reason is None, s.expected_value_score, s.confluence_score), reverse=True)[0]
+    rr = analyze_risk_reward(
+        normalized,
+        item,
+        best.direction,
+        max_risk_per_trade=min(config.MAX_ORDER_VALUE_USD, 100.0),
+        buying_power=float(account.get("buying_power") or 0) if account else None,
+        market_open=bool(clock and clock.get("is_open", False)),
+        circuit_breaker_active=get_tracker().circuit_breaker_active,
+        stale_data=stale,
+    )
+    return jsonify({
+        "status": "ok" if not stale else "degraded",
+        "stale_data": stale,
+        "reason": reason,
+        "source": source,
+        "risk_reward": asdict(rr),
+        "strategy_suite": [asdict(s) for s in suite],
+    })
+
+
+@app.get("/api/nexosignal/history/<symbol>")
+@login_required
+def api_nexosignal_history(symbol: str):
+    normalized = normalize_symbol(symbol)
+    bars, source, stale, reason = _load_symbol_bars([normalized], limit=120)
+    item = bars.get(normalized, [])
+    indicators = compute_indicators(item) if item else None
+    return jsonify({
+        "status": "ok" if item else "error",
+        "stale_data": stale,
+        "reason": reason,
+        "source": source,
+        "symbol": normalized,
+        "bars": item[-120:],
+        "indicators": asdict(indicators) if indicators else None,
+    })
+
+
+@app.get("/api/nexosignal/strategy-performance")
+@login_required
+def api_nexosignal_strategy_performance():
+    trades = list_trade_events(500)
+    events = list_performance_events(500)
+    grouped: dict[str, dict] = {}
+    for trade in trades:
+        name = trade.get("strategy") or "manual"
+        row = grouped.setdefault(name, {"strategy_name": name, "signals": 0, "trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0})
+        row["trades"] += 1
+        pnl = float(trade.get("realized_pnl") or 0)
+        row["total_pnl"] += pnl
+        row["wins"] += 1 if pnl > 0 else 0
+        row["losses"] += 1 if pnl < 0 else 0
+    for signal in list_signal_events(500):
+        name = signal.get("strategy") or "unknown"
+        grouped.setdefault(name, {"strategy_name": name, "signals": 0, "trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0})
+        grouped[name]["signals"] += 1
+    rows = []
+    for row in grouped.values():
+        closed = row["wins"] + row["losses"]
+        rows.append({
+            **row,
+            "win_rate": round((row["wins"] / closed) * 100, 2) if closed else 0,
+            "average_r": 0,
+            "historical_confidence": 0,
+            "current_status": "active" if row["signals"] or row["trades"] else "idle",
+        })
+    return jsonify({"status": "ok", "performance": rows, "telemetry_events": events[:25]})
+
+
+@app.get("/api/nexosignal/positions")
+@login_required
+def api_nexosignal_positions():
+    account, positions, clock = _safe_account_snapshot()
+    return jsonify({
+        "status": "ok" if account else "degraded",
+        "market_open": bool(clock and clock.get("is_open", False)),
+        "positions": positions,
+    })
+
+
+@app.get("/api/nexosignal/pnl")
+@login_required
+def api_nexosignal_pnl():
+    return jsonify({"status": "ok", "pnl": _pnl_payload()})
+
+
+@app.get("/api/nexosignal/telemetry")
+@login_required
+def api_nexosignal_telemetry():
+    bars, source, stale, reason = _load_symbol_bars()
+    predictions = build_ranked_predictions(bars, top_n=3)
+    picks = build_alpha_picks(bars, top_n=5)
+    tracker = get_tracker()
+    return jsonify({
+        "status": "ok" if not stale else "degraded",
+        "stale_data": stale,
+        "reason": reason,
+        "source": source,
+        "agent": current_agent_status(),
+        "safety": {
+            "circuit_breaker_active": tracker.circuit_breaker_active,
+            "circuit_breaker_reason": tracker.circuit_breaker_reason,
+            "guard_strikes": tracker.guard_strikes,
+        },
+        "top_predictions": [asdict(p) for p in predictions],
+        "alpha_picks": [asdict(p) for p in picks],
+        "pnl": _pnl_payload(),
+        "alerts": list_performance_events(10),
+    })
+
+
+@app.post("/api/nexosignal/alerts/test")
+@login_required
+def api_nexosignal_alerts_test():
+    from trading_agent.broker import TelegramNotifier
+
+    try:
+        TelegramNotifier().send("NexoSignal test alert: dashboard notification path is configured.")
+        return jsonify({"ok": True, "provider": "telegram", "message": "test alert attempted"})
+    except Exception as exc:
+        logger.warning("Alert test failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 503
+
+
+# ═══════════════════════════════════════════════ RESEARCH / EXPORT ROUTES ════
+
+@app.get("/api/research/earnings")
+@login_required
+def api_research_earnings():
+    from datetime import date, timedelta
+    syms_raw = request.args.get("symbols", ",".join(config.DEFAULT_DASHBOARD_SYMBOLS[:10]))
+    symbols = [normalize_symbol(s) for s in syms_raw.split(",") if s.strip()]
+    cache_key = ",".join(sorted(symbols))
+    now = time.time()
+    if (_earnings_cache["data"] and now - _earnings_cache["ts"] < _EARNINGS_TTL
+            and _earnings_cache["key"] == cache_key):
+        return jsonify(_earnings_cache["data"])
+    if not config.FMP_API_KEY:
+        return jsonify({"status": "disabled", "reason": "FMP_API_KEY not configured", "earnings": []})
+    today = date.today()
+    from_dt = today.strftime("%Y-%m-%d")
+    to_dt = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+    try:
+        resp = requests.get(
+            "https://financialmodelingprep.com/api/v3/earning_calendar",
+            params={"from": from_dt, "to": to_dt, "apikey": config.FMP_API_KEY},
+            timeout=8,
+        )
+        if not resp.ok:
+            return jsonify({"status": "error", "reason": f"FMP {resp.status_code}", "earnings": []})
+        sym_set = {s.split("/")[0] for s in symbols}
+        data = resp.json() if isinstance(resp.json(), list) else []
+        filtered = [
+            {"symbol": e.get("symbol"), "date": e.get("date"),
+             "eps_estimate": e.get("epsEstimated"), "revenue_estimate": e.get("revenueEstimated"),
+             "time": e.get("time")}
+            for e in data if e.get("symbol") in sym_set
+        ]
+        result = {"status": "ok", "earnings": filtered, "from": from_dt, "to": to_dt}
+        _earnings_cache.update({"data": result, "ts": now, "key": cache_key})
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("Earnings calendar failed: %s", exc)
+        return jsonify({"status": "error", "reason": str(exc)[:120], "earnings": []})
+
+
+@app.get("/api/research/sentiment/<symbol>")
+@login_required
+def api_research_sentiment(symbol: str):
+    sym = normalize_symbol(symbol).replace("/", "").upper()
+    cache_key = f"st:{sym}"
+    now = time.time()
+    cached = _quote_cache.get(cache_key)
+    if cached and now - cached.get("_ts", 0) < 300:
+        return jsonify({k: v for k, v in cached.items() if k != "_ts"})
+    try:
+        resp = requests.get(
+            f"https://api.stocktwits.com/api/2/streams/symbol/{sym}.json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        if resp.status_code == 429:
+            return jsonify({"status": "rate_limited", "symbol": sym, "bullish": 0, "bearish": 0, "total": 0})
+        if not resp.ok:
+            return jsonify({"status": "error", "symbol": sym, "reason": f"HTTP {resp.status_code}",
+                            "bullish": 0, "bearish": 0, "total": 0})
+        messages = resp.json().get("messages", [])
+        bullish = sum(1 for m in messages
+                      if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bullish")
+        bearish = sum(1 for m in messages
+                      if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bearish")
+        total = len(messages)
+        result = {"status": "ok", "symbol": sym, "bullish": bullish, "bearish": bearish, "total": total,
+                  "bull_pct": round(bullish / max(total, 1) * 100),
+                  "bear_pct": round(bearish / max(total, 1) * 100)}
+        _quote_cache[cache_key] = {**result, "_ts": now}
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("StockTwits failed for %s: %s", sym, exc)
+        return jsonify({"status": "error", "symbol": sym, "reason": str(exc)[:120],
+                        "bullish": 0, "bearish": 0, "total": 0})
+
+
+@app.get("/api/research/dcf/<symbol>")
+@login_required
+def api_research_dcf(symbol: str):
+    sym = normalize_symbol(symbol)
+    if is_supported_crypto(sym):
+        return jsonify({"status": "not_applicable", "reason": "DCF not available for crypto"})
+    if not config.FMP_API_KEY:
+        return jsonify({"status": "disabled", "reason": "FMP_API_KEY not configured"})
+    cache_key = f"dcf:{sym}"
+    now = time.time()
+    cached = _quote_cache.get(cache_key)
+    if cached and now - cached.get("_ts", 0) < 3600:
+        return jsonify({k: v for k, v in cached.items() if k != "_ts"})
+    try:
+        resp = requests.get(
+            f"https://financialmodelingprep.com/api/v3/discounted-cash-flow/{sym}",
+            params={"apikey": config.FMP_API_KEY}, timeout=8,
+        )
+        if not resp.ok:
+            return jsonify({"status": "error", "reason": f"FMP {resp.status_code}"})
+        raw = resp.json()
+        entry = (raw[0] if isinstance(raw, list) and raw else raw) or {}
+        dcf_val = entry.get("dcf")
+        price = entry.get("Stock Price") or entry.get("price")
+        upside = round((float(dcf_val) / float(price) - 1) * 100, 1) if dcf_val and price else None
+        result = {
+            "status": "ok", "symbol": sym,
+            "dcf_value": round(float(dcf_val), 2) if dcf_val else None,
+            "current_price": round(float(price), 2) if price else None,
+            "upside_pct": upside,
+            "fair_value_label": ("undervalued" if upside and upside > 10
+                                 else "overvalued" if upside and upside < -10
+                                 else "fairly valued" if upside is not None else "unknown"),
+            "date": entry.get("date"),
+        }
+        _quote_cache[cache_key] = {**result, "_ts": now}
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("DCF failed for %s: %s", sym, exc)
+        return jsonify({"status": "error", "reason": str(exc)[:120]})
+
+
+@app.get("/api/export/bars/<symbol>")
+@login_required
+def api_export_bars(symbol: str):
+    from flask import Response as FlaskResponse
+    normalized = normalize_symbol(symbol)
+    timeframe = request.args.get("timeframe", "1Day")
+    limit = min(int(request.args.get("limit", "365")), 1000)
+    broker = get_broker()
+    if not broker:
+        return jsonify({"error": "Broker unavailable"}), 503
+    try:
+        bars = broker.get_bars(normalized, timeframe=timeframe, limit=limit)
+    except BrokerError as exc:
+        return jsonify({"error": str(exc)}), 503
+    if not bars:
+        return jsonify({"error": f"No bars for {normalized}"}), 404
+    lines = ["timestamp,open,high,low,close,volume"]
+    for b in bars:
+        lines.append(f"{b.get('t','')},{b.get('o',0)},{b.get('h',0)},{b.get('l',0)},{b.get('c',0)},{b.get('v',0)}")
+    filename = f"{normalized.replace('/', '')}_{timeframe}_{limit}bars.csv"
+    return FlaskResponse(
+        "\n".join(lines), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/api/research/patterns/<symbol>")
+@login_required
+def api_research_patterns(symbol: str):
+    normalized = normalize_symbol(symbol)
+    bars, source, stale, reason = _load_symbol_bars([normalized], limit=50)
+    item = bars.get(normalized, [])
+    if len(item) < 10:
+        return jsonify({"status": "error", "reason": f"insufficient bars for {normalized}",
+                        "patterns": []}), 404
+    try:
+        import pandas as pd
+        import pandas_ta as pta  # noqa: F401
+        df = pd.DataFrame(item)
+        df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+        for col in ("open", "high", "low", "close"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        cdl = df.ta.cdl_pattern(name="all", append=False)
+        patterns = []
+        if cdl is not None and len(cdl):
+            last = cdl.iloc[-1]
+            for col in cdl.columns:
+                val = last[col]
+                if val != 0:
+                    label = col.replace("CDL_", "").replace("_", " ").title()
+                    patterns.append({"pattern": label, "signal": "bullish" if val > 0 else "bearish"})
+        return jsonify({"status": "ok", "symbol": normalized, "source": source,
+                        "stale_data": stale, "patterns": patterns, "bar_count": len(item)})
+    except ImportError:
+        return jsonify({"status": "unavailable",
+                        "reason": "pandas-ta not installed — run: pip install pandas-ta",
+                        "patterns": []}), 503
+    except Exception as exc:
+        logger.exception("Pattern detection failed for %s", normalized)
+        return jsonify({"status": "error", "reason": str(exc)[:200], "patterns": []}), 500
+
+
+@app.get("/api/research/sector-allocation")
+@login_required
+def api_research_sector_allocation():
+    _, positions, _ = _safe_account_snapshot()
+    if not positions:
+        return jsonify({"status": "ok", "sectors": [], "total": 0.0, "source": "none"})
+    from trading_agent.restrictions import _SECTOR_BUCKETS
+    sym_to_sector: dict[str, str] = {
+        sym: bucket.replace("_", " ").title()
+        for bucket, syms in _SECTOR_BUCKETS.items()
+        for sym in syms
+    }
+    sector_values: dict[str, float] = {}
+    for p in positions:
+        sym = str(p.get("symbol", "")).upper()
+        sector = sym_to_sector.get(sym, "Other")
+        mv = float(p.get("market_value") or 0)
+        sector_values[sector] = sector_values.get(sector, 0.0) + mv
+    total = sum(sector_values.values())
+    sectors = sorted(
+        [{"sector": s, "value": round(v, 2), "pct": round(v / max(total, 0.01) * 100, 1)}
+         for s, v in sector_values.items()],
+        key=lambda x: x["value"], reverse=True,
+    )
+    return jsonify({"status": "ok", "sectors": sectors, "total": round(total, 2),
+                    "source": "alpaca+static"})
+
+
+@app.get("/api/research/analyst/<symbol>")
+@login_required
+def api_research_analyst(symbol: str):
+    sym = normalize_symbol(symbol)
+    if is_supported_crypto(sym):
+        return jsonify({"status": "not_applicable", "reason": "No analyst ratings for crypto",
+                        "ratings": []})
+    if not config.FMP_API_KEY:
+        return jsonify({"status": "disabled", "reason": "FMP_API_KEY not configured", "ratings": []})
+    cache_key = f"analyst:{sym}"
+    now = time.time()
+    cached = _quote_cache.get(cache_key)
+    if cached and now - cached.get("_ts", 0) < 3600:
+        return jsonify({k: v for k, v in cached.items() if k != "_ts"})
+    try:
+        resp = requests.get(
+            f"https://financialmodelingprep.com/api/v3/upgrades-downgrades/{sym}",
+            params={"apikey": config.FMP_API_KEY}, timeout=8,
+        )
+        if not resp.ok:
+            return jsonify({"status": "error", "reason": f"FMP {resp.status_code}", "ratings": []})
+        raw = resp.json()
+        ratings = [
+            {"published_date": r.get("publishedDate", "")[:10], "firm": r.get("gradingCompany"),
+             "action": r.get("action"), "from_grade": r.get("previousGrade"),
+             "to_grade": r.get("newGrade")}
+            for r in (raw if isinstance(raw, list) else [])[:15]
+        ]
+        result = {"status": "ok", "symbol": sym, "ratings": ratings}
+        _quote_cache[cache_key] = {**result, "_ts": now}
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("Analyst ratings failed for %s: %s", sym, exc)
+        return jsonify({"status": "error", "reason": str(exc)[:120], "ratings": []})
 
 
 # ═══════════════════════════════════════════════════════ TRADING ACTIONS ════
@@ -592,8 +1178,24 @@ _ticker_cache: dict = {"data": None, "ts": 0}
 _TICKER_TTL = 30  # seconds
 _quote_cache: dict[str, dict] = {}
 _QUOTE_TTL = 15
+_earnings_cache: dict = {"data": None, "ts": 0.0, "key": ""}
+_EARNINGS_TTL = 3600
 _tradingview_quotes: dict[str, dict] = {}
 _tradingview_lock = threading.Lock()
+
+# OHLCV cache for the chart page (avoids hammering Alpaca on every indicator toggle)
+_chart_ohlcv_cache: dict[str, dict] = {}  # key → {data, ts}
+
+# Lens intelligence summary cache (15 min TTL — avoids re-running AI on every page view)
+_lens_summary_cache: dict[str, dict] = {}  # symbol → {data, ts}
+_LENS_SUMMARY_TTL = 900  # 15 minutes
+_CHART_OHLCV_TTL: dict[str, int] = {  # TTL seconds by timeframe
+    "1Min": 30, "5Min": 30, "15Min": 60, "30Min": 60,
+    "1Hour": 120, "4Hour": 300,
+    "1Day": 300, "1Week": 600, "1Month": 1800,
+}
+_DEFAULT_CHART_TTL = 60
+_ALLOWED_TIMEFRAMES = frozenset(_CHART_OHLCV_TTL.keys())
 
 _TICKER_SYMBOLS = [
     # US Indices (ETFs)
@@ -989,162 +1591,6 @@ def api_market_data():
     _market_cache["ts"][cache_key] = now
     return jsonify(result)
 
-    # ── US stocks (concurrent: Alpaca snapshot batch + parallel YF 52-wk) ──
-    if region == "us":
-        try:
-            broker = AlpacaBroker()
-            # One batch call returns latestTrade, dailyBar, prevDailyBar for all symbols
-            snapshots = broker.get_bulk_snapshots_sync(_US_MOST_ACTIVE)
-
-            # Kick off Yahoo Finance calls in parallel for 52-wk range data
-            def _yf_fetch(sym):
-                return sym, _fetch_yfinance_quote(sym)
-
-            yf_results: dict[str, dict | None] = {}
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                futures = {pool.submit(_yf_fetch, sym): sym for sym in _US_MOST_ACTIVE}
-                for fut in as_completed(futures, timeout=8):
-                    try:
-                        sym, data = fut.result()
-                        yf_results[sym] = data
-                    except Exception:
-                        pass
-
-            stocks = []
-            for sym in _US_MOST_ACTIVE:
-                snap = snapshots.get(sym) or snapshots.get(sym.upper())
-                if not snap:
-                    continue
-                try:
-                    daily     = snap.get("dailyBar") or {}
-                    prev_daily= snap.get("prevDailyBar") or {}
-                    cur       = float(daily.get("c") or daily.get("Close") or 0)
-                    prev      = float(prev_daily.get("c") or prev_daily.get("Close") or cur)
-                    if cur == 0:
-                        continue
-                    chg     = cur - prev
-                    chg_pct = (chg / prev * 100) if prev else 0.0
-                    vol     = float(daily.get("v") or daily.get("Volume") or 0)
-                    wk_q    = yf_results.get(sym)
-                    stocks.append({
-                        "symbol":     sym,
-                        "name":       sym,
-                        "price":      round(cur, 2),
-                        "change":     round(chg, 2),
-                        "change_pct": round(chg_pct, 2),
-                        "volume":     vol,
-                        "avg_volume": wk_q["volume"] if wk_q and wk_q.get("volume") else None,
-                        "market_cap": None,
-                        "pe_ratio":   None,
-                        "wk52_high":  wk_q["wk52_high"] if wk_q else None,
-                        "wk52_low":   wk_q["wk52_low"]  if wk_q else None,
-                        "wk52_chg":   None,
-                    })
-                except Exception:
-                    pass
-
-            # If snapshots returned nothing (outside market hours fallback) try per-bar fetch in parallel
-            if not stocks:
-                def _bar_fetch(sym):
-                    bars = broker.get_bars(sym, timeframe="1Day", limit=2)
-                    if not bars:
-                        return None
-                    cur  = float(bars[-1]["c"])
-                    prev = float(bars[-2]["c"]) if len(bars) >= 2 else cur
-                    chg  = cur - prev
-                    chg_pct = (chg / prev * 100) if prev else 0.0
-                    return {
-                        "symbol": sym, "name": sym,
-                        "price": round(cur, 2), "change": round(chg, 2),
-                        "change_pct": round(chg_pct, 2),
-                        "volume": float(bars[-1].get("v", 0)),
-                        "avg_volume": None, "market_cap": None, "pe_ratio": None,
-                        "wk52_high": None, "wk52_low": None, "wk52_chg": None,
-                    }
-                with ThreadPoolExecutor(max_workers=10) as pool:
-                    for row in pool.map(_bar_fetch, _US_MOST_ACTIVE, timeout=15):
-                        if row:
-                            stocks.append(row)
-
-            # Sort by screen
-            if screen == "gainers":
-                stocks.sort(key=lambda x: x["change_pct"], reverse=True)
-            elif screen == "losers":
-                stocks.sort(key=lambda x: x["change_pct"])
-            elif screen == "52wk_high":
-                stocks.sort(key=lambda x: x["change_pct"], reverse=True)
-            elif screen == "52wk_low":
-                stocks.sort(key=lambda x: x["change_pct"])
-            else:  # most active
-                stocks.sort(key=lambda x: x["volume"] or 0, reverse=True)
-            result["stocks"] = stocks
-        except Exception as e:
-            logger.warning("Market data fetch error (US): %s", e)
-
-    # ── Asian indices (parallel Yahoo Finance) ───────────────────────────
-    def _fetch_asian(idx_item):
-        q = _fetch_yfinance_quote(idx_item["symbol"])
-        if not q:
-            return None
-        return {
-            "symbol":     idx_item["symbol"],
-            "name":       idx_item["name"],
-            "exchange":   idx_item["exchange"],
-            "price":      q["price"],
-            "change":     q["change"],
-            "change_pct": q["change_pct"],
-            "volume":     q["volume"],
-            "wk52_chg":   None,
-        }
-
-    asian = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        for row in pool.map(_fetch_asian, _ASIAN_INDICES, timeout=10):
-            if row:
-                asian.append(row)
-    result["asian"] = asian
-
-    # ── Crypto (parallel Alpaca bars) ────────────────────────────────────
-    if region in ("us", "crypto"):
-        try:
-            broker = AlpacaBroker()
-
-            def _fetch_crypto(item):
-                sym = item["symbol"]
-                try:
-                    bars = broker.get_bars(sym, timeframe="1Day", limit=2)
-                    if not bars:
-                        return None
-                    cur  = float(bars[-1]["c"])
-                    prev = float(bars[-2]["c"]) if len(bars) >= 2 else cur
-                    chg  = cur - prev
-                    chg_pct = (chg / prev * 100) if prev else 0.0
-                    return {
-                        "symbol":     sym.replace("/USD", ""),
-                        "name":       item["name"],
-                        "price":      round(cur, 2),
-                        "change":     round(chg, 2),
-                        "change_pct": round(chg_pct, 2),
-                        "volume":     float(bars[-1].get("v", 0)),
-                        "market_cap": None,
-                        "chg7d":      None,
-                    }
-                except Exception:
-                    return None
-
-            crypto = []
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                for row in pool.map(_fetch_crypto, _US_CRYPTO, timeout=12):
-                    if row:
-                        crypto.append(row)
-            result["crypto"] = crypto
-        except Exception as e:
-            logger.warning("Market data fetch error (crypto): %s", e)
-
-    _market_cache["data"][cache_key] = result
-    _market_cache["ts"][cache_key] = now
-    return jsonify(result)
-
 
 # ═══════════════════════════════════════════════════════ JSON API — OTHER ════
 
@@ -1348,6 +1794,653 @@ def api_performance():
         return jsonify(list_performance_events(100))
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/chart/<symbol>")
+@login_required
+def chart(symbol: str):
+    """Dedicated TradingView chart page for a single symbol."""
+    normalized = normalize_symbol(symbol.strip().upper())
+    return render_template("chart.html", symbol=normalized, config=config)
+
+
+@app.get("/api/chart/<symbol>/ohlcv")
+@login_required
+def api_chart_ohlcv(symbol: str):
+    """OHLCV bars + indicator overlays formatted for TradingView Lightweight Charts."""
+    normalized = normalize_symbol(symbol.strip().upper())
+    timeframe  = request.args.get("timeframe", "1Day")
+    try:
+        limit = min(max(int(request.args.get("limit", "200")), 2), 1000)
+    except (ValueError, TypeError):
+        limit = 200
+
+    if timeframe not in _ALLOWED_TIMEFRAMES:
+        return jsonify({
+            "error": f"Invalid timeframe '{timeframe}'. Allowed: {', '.join(sorted(_ALLOWED_TIMEFRAMES))}",
+        }), 400
+
+    # Check cache
+    cache_key = f"{normalized}:{timeframe}:{limit}"
+    now = time.time()
+    cached = _chart_ohlcv_cache.get(cache_key)
+    ttl = _CHART_OHLCV_TTL.get(timeframe, _DEFAULT_CHART_TTL)
+    if cached and now - cached["ts"] < ttl:
+        return jsonify(cached["data"])
+
+    stale_data = False
+
+    broker = get_broker()
+    raw_bars = []
+    if broker:
+        try:
+            raw_bars = broker.get_bars(normalized, timeframe=timeframe, limit=limit)
+        except Exception as exc:
+            logger.warning("Chart OHLCV fetch failed %s %s: %s", normalized, timeframe, exc)
+
+    if not raw_bars:
+        raw_bars = _fallback_bars(normalized, count=limit)
+        stale_data = True
+
+    # Build TradingView-compatible bar objects {time, open, high, low, close, volume}
+    from datetime import date as _date, timedelta, datetime as _dt
+    base_date = _date.today() - timedelta(days=len(raw_bars))
+    is_daily = timeframe in ("1Day", "1Week", "1Month")
+    ohlcv: list[dict] = []
+    for i, b in enumerate(raw_bars):
+        t_raw = b.get("t")
+        if t_raw:
+            try:
+                dt = _dt.fromisoformat(str(t_raw).replace("Z", "+00:00"))
+                time_val: str | int = dt.strftime("%Y-%m-%d") if is_daily else int(dt.timestamp())
+            except Exception:
+                time_val = (base_date + timedelta(days=i)).isoformat()
+        else:
+            time_val = (base_date + timedelta(days=i)).isoformat()
+
+        ohlcv.append({
+            "time":   time_val,
+            "open":   float(b.get("o") or 0),
+            "high":   float(b.get("h") or 0),
+            "low":    float(b.get("l") or 0),
+            "close":  float(b.get("c") or 0),
+            "volume": float(b.get("v") or 0),
+        })
+
+    closes = [b["close"] for b in ohlcv]
+    times  = [b["time"]  for b in ohlcv]
+
+    def _sma(period: int) -> list[dict]:
+        result = []
+        for i in range(period - 1, len(closes)):
+            avg = sum(closes[i - period + 1: i + 1]) / period
+            result.append({"time": times[i], "value": round(avg, 4)})
+        return result
+
+    def _ema(period: int) -> list[dict]:
+        k = 2 / (period + 1)
+        result, ema_val = [], None
+        for i, c in enumerate(closes):
+            ema_val = c if ema_val is None else c * k + ema_val * (1 - k)
+            if i >= period - 1:
+                result.append({"time": times[i], "value": round(ema_val, 4)})
+        return result
+
+    def _rsi(period: int = 14) -> list[dict]:
+        if len(closes) < period + 1:
+            return []
+        gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+        losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+        result = []
+        for i in range(period - 1, len(gains)):
+            ag = sum(gains[i - period + 1: i + 1]) / period
+            al = sum(losses[i - period + 1: i + 1]) / period
+            rsi_val = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+            result.append({"time": times[i + 1], "value": round(rsi_val, 2)})
+        return result
+
+    try:
+        indicators_obj = compute_indicators(raw_bars) if raw_bars else None
+        indicators_dict = asdict(indicators_obj) if indicators_obj else {}
+    except Exception as exc:
+        logger.warning("compute_indicators failed for %s: %s", normalized, exc)
+        indicators_dict = {}
+
+    payload = {
+        "status":     "ok" if not stale_data else "degraded",
+        "stale_data": stale_data,
+        "symbol":     normalized,
+        "timeframe":  timeframe,
+        "bars":       ohlcv,
+        "indicators": indicators_dict,
+        "overlays": {
+            "sma20": _sma(20),
+            "sma50": _sma(50),
+            "ema9":  _ema(9),
+            "rsi14": _rsi(14),
+        },
+        "bar_count": len(ohlcv),
+    }
+
+    _chart_ohlcv_cache[cache_key] = {"data": payload, "ts": now}
+    return jsonify(payload)
+
+
+@app.get("/api/chart/<symbol>/signals")
+@login_required
+def api_chart_signals(symbol: str):
+    """Signal events filtered to a single symbol, for the chart page signal history."""
+    normalized = normalize_symbol(symbol.strip().upper())
+    all_signals = list_signal_events(200)
+    filtered = [s for s in all_signals if s.get("symbol") == normalized]
+    return jsonify({"status": "ok", "symbol": normalized, "signals": filtered[:50]})
+
+
+# ══════════════════════════════════════════ STRATEGY PORTFOLIO ROUTES ════════
+
+@app.get("/api/strategies")
+@login_required
+def api_strategies_list():
+    portfolios = list_strategy_portfolios()
+    return jsonify({"status": "ok", "strategies": portfolios})
+
+
+@app.post("/api/strategies")
+@login_required
+def api_strategies_create():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "Strategy name is required"}), 400
+
+    allowed_types = {"sma_crossover", "rsi", "vwap"}
+    strategy_type = str(data.get("strategy_type", "sma_crossover"))
+    if strategy_type not in allowed_types:
+        return jsonify({"error": f"strategy_type must be one of: {', '.join(sorted(allowed_types))}"}), 400
+
+    try:
+        allocation_pct    = max(0.001, min(1.0, float(data.get("allocation_pct", 0.1))))
+        max_position_usd  = max(1.0, float(data.get("max_position_usd", 1000.0)))
+        max_drawdown_pct  = max(0.001, min(1.0, float(data.get("max_drawdown_pct", 0.05))))
+        daily_loss_limit  = max(1.0, float(data.get("daily_loss_limit_usd", 500.0)))
+        min_confidence    = max(0.0, min(100.0, float(data.get("min_confidence", 70.0))))
+        min_risk_reward   = max(1.0, float(data.get("min_risk_reward", 5.0)))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": f"Invalid numeric field: {exc}"}), 400
+
+    portfolio_id = create_strategy_portfolio(
+        name=name,
+        description=str(data.get("description", "")).strip() or None,
+        symbols=str(data.get("symbols", "")).strip(),
+        strategy_type=strategy_type,
+        allocation_pct=allocation_pct,
+        max_position_usd=max_position_usd,
+        max_drawdown_pct=max_drawdown_pct,
+        daily_loss_limit_usd=daily_loss_limit,
+        min_confidence=min_confidence,
+        min_risk_reward=min_risk_reward,
+        autopilot_active=bool(data.get("autopilot_active", False)),
+        dry_run=bool(data.get("dry_run", True)),
+    )
+    logger.info("Strategy portfolio created: '%s' id=%s by %s", name, portfolio_id, session.get("username"))
+    return jsonify({"status": "ok", "id": portfolio_id, "name": name}), 201
+
+
+@app.route("/api/strategies/<int:portfolio_id>", methods=["PATCH"])
+@login_required
+def api_strategies_update(portfolio_id: int):
+    existing = get_strategy_portfolio(portfolio_id)
+    if not existing:
+        return jsonify({"error": "Strategy not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    updates: dict[str, object] = {}
+
+    if "name" in data:
+        name = str(data["name"]).strip()
+        if not name:
+            return jsonify({"error": "name cannot be empty"}), 400
+        updates["name"] = name
+
+    for str_field in ("description", "symbols", "strategy_type"):
+        if str_field in data:
+            updates[str_field] = str(data[str_field]).strip() or None if str_field == "description" else str(data[str_field]).strip()
+
+    for bool_field in ("autopilot_active", "dry_run"):
+        if bool_field in data:
+            val = data[bool_field]
+            updates[bool_field] = bool(val)
+
+    for float_field in ("allocation_pct", "max_position_usd", "max_drawdown_pct",
+                        "daily_loss_limit_usd", "min_confidence", "min_risk_reward"):
+        if float_field in data:
+            try:
+                updates[float_field] = float(data[float_field])
+            except (TypeError, ValueError):
+                pass
+
+    if "autopilot_active" in updates and updates["autopilot_active"] and not existing.get("dry_run") and config.TRADING_MODE == "live":
+        logger.warning("Autopilot armed in LIVE mode for strategy %s by %s", portfolio_id, session.get("username"))
+
+    update_strategy_portfolio(portfolio_id, **updates)
+    return jsonify({"status": "ok", "id": portfolio_id})
+
+
+@app.route("/api/strategies/<int:portfolio_id>", methods=["DELETE"])
+@login_required
+def api_strategies_delete(portfolio_id: int):
+    existing = get_strategy_portfolio(portfolio_id)
+    if not existing:
+        return jsonify({"error": "Strategy not found"}), 404
+    delete_strategy_portfolio(portfolio_id)
+    logger.info("Strategy portfolio %s deleted by %s", portfolio_id, session.get("username"))
+    return jsonify({"status": "ok"})
+
+
+# ══════════════════════════════════════════════ SIGNAL EXECUTE ROUTE ══════════
+
+@app.post("/api/execute-signal")
+@login_required
+def api_execute_signal():
+    """Execute a signal as a market, limit, or bracket order."""
+    data = request.get_json(silent=True) or {}
+
+    symbol     = normalize_symbol(str(data.get("symbol", "")).strip().upper())
+    side       = str(data.get("side", "buy")).lower()
+    order_type = str(data.get("order_type", "market")).lower()
+    dry_run    = bool(data.get("dry_run", True))
+    strategy_portfolio_id = data.get("strategy_portfolio_id")
+
+    try:
+        qty = float(data.get("qty", 1))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid qty"}), 400
+
+    if not symbol:
+        return jsonify({"ok": False, "error": "Symbol required"}), 400
+    if side not in ("buy", "sell"):
+        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
+    if qty <= 0:
+        return jsonify({"ok": False, "error": "qty must be positive"}), 400
+    if order_type not in ("market", "limit", "bracket"):
+        return jsonify({"ok": False, "error": "order_type must be market, limit, or bracket"}), 400
+
+    limit_price = data.get("limit_price")
+    stop_loss   = data.get("stop_loss")
+    take_profit = data.get("take_profit")
+
+    if order_type in ("limit", "bracket") and limit_price is None:
+        return jsonify({"ok": False, "error": "limit_price required for limit/bracket orders"}), 400
+    if order_type == "bracket" and (stop_loss is None or take_profit is None):
+        return jsonify({"ok": False, "error": "stop_loss and take_profit required for bracket orders"}), 400
+
+    try:
+        limit_price_f  = float(limit_price) if limit_price is not None else None
+        stop_loss_f    = float(stop_loss)   if stop_loss   is not None else None
+        take_profit_f  = float(take_profit) if take_profit is not None else None
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Invalid price: {exc}"}), 400
+
+    # Validate 5:1 R:R for bracket orders (guard enforcement in the UI)
+    if order_type == "bracket" and limit_price_f and stop_loss_f and take_profit_f:
+        risk   = abs(limit_price_f - stop_loss_f)
+        reward = abs(take_profit_f - limit_price_f)
+        rr     = reward / risk if risk > 0 else 0
+        if rr < config.MIN_RISK_REWARD_RATIO and not dry_run:
+            return jsonify({
+                "ok": False,
+                "error": f"R:R {rr:.1f}:1 is below minimum {config.MIN_RISK_REWARD_RATIO}:1 guard. Adjust stop/target or use dry-run.",
+            }), 400
+
+    try:
+        broker = AlpacaBroker()
+        price  = broker.get_last_price(symbol)
+
+        if dry_run:
+            record_trade_event(
+                source="signal_execute", symbol=symbol, side=side, qty=qty,
+                order_type=order_type, status="dry_run",
+                price=float(limit_price_f or price),
+                target_stop_loss=stop_loss_f, target_take_profit=take_profit_f,
+                dry_run=True, execution_mode="manual",
+            )
+            return jsonify({"ok": True, "status": "dry_run", "symbol": symbol, "price": price})
+
+        # Live execution — safety checks already passed above
+        if order_type == "market":
+            order = broker.place_market_order(symbol, side, qty)
+        elif order_type == "limit":
+            order = broker.place_limit_order(symbol, side, qty, limit_price_f)
+        else:  # bracket
+            order = broker.place_bracket_order(symbol, qty, limit_price_f, stop_loss_f, take_profit_f)
+
+        record_trade_event(
+            source="signal_execute", symbol=symbol, side=side, qty=qty,
+            order_type=order_type, status=order.get("status", "submitted"),
+            order_id=order.get("id"), price=price, raw=order,
+            target_stop_loss=stop_loss_f, target_take_profit=take_profit_f,
+            dry_run=False, execution_mode="manual",
+        )
+
+        # Background poll for fill
+        order_id_val = order.get("id")
+        if order_id_val:
+            threading.Thread(target=_poll_order_fill, args=(order_id_val, symbol), daemon=True).start()
+
+        # Update strategy portfolio stats if linked
+        if strategy_portfolio_id:
+            try:
+                sp_id = int(strategy_portfolio_id)
+                record_strategy_trade(sp_id, win=False, pnl=0.0)  # placeholder; win/pnl updated on fill
+            except Exception:
+                pass
+
+        logger.info(
+            "execute_signal: %s %s %s qty=%s order_id=%s mode=%s",
+            order_type, side, symbol, qty, order_id_val, config.TRADING_MODE,
+        )
+        return jsonify({"ok": True, "status": order.get("status"), "order_id": order_id_val, "symbol": symbol})
+
+    except (BrokerError, RejectedOrder, ValueError) as exc:
+        record_trade_event(
+            source="signal_execute", symbol=symbol, side=side, qty=qty,
+            order_type=order_type, status="error", error=str(exc), execution_mode="manual",
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("execute_signal failed for %s", symbol)
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 500
+
+
+@app.get("/api/order-preview")
+@login_required
+def api_order_preview():
+    """Return estimated position sizing given symbol + allocation % of portfolio."""
+    symbol = normalize_symbol(request.args.get("symbol", "").strip().upper())
+    allocation_pct = float(request.args.get("allocation_pct", "0.1") or "0.1")
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+    try:
+        broker = AlpacaBroker()
+        price  = broker.get_last_price(symbol)
+        account = broker.get_account()
+        portfolio_value = float(account.get("portfolio_value") or 0)
+        buying_power    = float(account.get("buying_power")    or 0)
+        alloc_usd  = round(portfolio_value * min(allocation_pct, 1.0), 2)
+        max_qty    = alloc_usd / price if price > 0 else 0
+        safe_qty   = min(max_qty, buying_power / price) if price > 0 else 0
+        return jsonify({
+            "symbol":          symbol,
+            "price":           price,
+            "portfolio_value": portfolio_value,
+            "buying_power":    buying_power,
+            "alloc_usd":       alloc_usd,
+            "suggested_qty":   round(safe_qty, 4),
+        })
+    except BrokerError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+# ══════════════════════════════════════════════ LENS INTELLIGENCE ROUTES ═════
+
+@app.get("/api/lens/summary/<symbol>")
+@login_required
+def api_lens_summary(symbol: str):
+    """AI intelligence summary for a symbol — cached 15 min in memory and Supabase."""
+    from trading_agent.ai_research import generate_lens_summary
+    normalized = normalize_symbol(symbol.strip().upper())
+    if not normalized:
+        return jsonify({"error": "symbol required"}), 400
+
+    now = time.time()
+
+    # In-memory cache check
+    cached_mem = _lens_summary_cache.get(normalized)
+    if cached_mem and now - cached_mem["ts"] < _LENS_SUMMARY_TTL:
+        return jsonify({**cached_mem["data"], "cached": True})
+
+    # Supabase cache check
+    db_cached = get_cached_lens_report(normalized, "summary")
+    if db_cached:
+        payload = db_cached.get("content_json", {})
+        payload["cached"] = True
+        _lens_summary_cache[normalized] = {"data": payload, "ts": now}
+        return jsonify(payload)
+
+    # Generate fresh summary
+    try:
+        broker = AlpacaBroker()
+        price = broker.get_last_price(normalized)
+        bars  = broker.get_bars(normalized, timeframe="1Day", limit=30)
+    except BrokerError:
+        price = 0.0
+        bars  = []
+
+    try:
+        from trading_agent.signal_engine import compute_indicators
+        ind = compute_indicators(bars) if bars else None
+        indicators_dict = asdict(ind) if ind else {}
+    except Exception:
+        indicators_dict = {}
+
+    summary = generate_lens_summary(normalized, price, bars, indicators_dict)
+
+    # Persist to memory and Supabase
+    _lens_summary_cache[normalized] = {"data": summary, "ts": now}
+    try:
+        cache_lens_report(
+            symbol=normalized,
+            report_type="summary",
+            content_json=summary,
+            conviction_score=summary.get("conviction_score"),
+            expires_in_secs=_LENS_SUMMARY_TTL,
+        )
+    except Exception:
+        pass
+
+    return jsonify(summary)
+
+
+@app.post("/api/lens/ask")
+@login_required
+def api_lens_ask():
+    """Custom AI research query — Ask the Lens anything about a symbol."""
+    from trading_agent.ai_research import generate_lens_summary
+    data = request.get_json(silent=True) or {}
+    symbol = normalize_symbol(str(data.get("symbol", "")).strip().upper())
+    query  = str(data.get("query", "")).strip()
+    if not symbol or not query:
+        return jsonify({"error": "symbol and query are required"}), 400
+    if len(query) > 500:
+        return jsonify({"error": "query too long (max 500 chars)"}), 400
+
+    try:
+        broker = AlpacaBroker()
+        price = broker.get_last_price(symbol)
+        bars  = broker.get_bars(symbol, timeframe="1Day", limit=20)
+    except BrokerError:
+        price = 0.0
+        bars  = []
+
+    try:
+        from trading_agent.signal_engine import compute_indicators
+        ind = compute_indicators(bars) if bars else None
+        indicators_dict = asdict(ind) if ind else {}
+    except Exception:
+        indicators_dict = {}
+
+    result = generate_lens_summary(symbol, price, bars, indicators_dict, query=query)
+
+    try:
+        cache_lens_report(
+            symbol=symbol,
+            report_type="ask",
+            content_json=result,
+            conviction_score=result.get("conviction_score"),
+            expires_in_secs=86400,
+            query=query,
+        )
+    except Exception:
+        pass
+
+    return jsonify({**result, "symbol": symbol, "query": query})
+
+
+@app.get("/api/lens/history")
+@login_required
+def api_lens_history():
+    """Recent Lens reports — for the Research page Signal History table."""
+    symbol      = request.args.get("symbol", "").strip().upper() or None
+    report_type = request.args.get("type", "").strip() or None
+    limit       = min(int(request.args.get("limit", 50) or 50), 200)
+    reports     = list_lens_reports(limit=limit, symbol=symbol, report_type=report_type)
+    return jsonify({"status": "ok", "reports": reports, "count": len(reports)})
+
+
+# ══════════════════════════════════════════════ BACKTESTING ROUTES ═══════════
+
+@app.get("/backtest")
+@login_required
+def backtest_page():
+    """Render the Backtesting Engine page."""
+    recent_runs = list_backtest_runs(20)
+    return render_template(
+        "backtest.html",
+        config=config,
+        recent_runs=recent_runs,
+        strategies=["sma_crossover", "rsi", "vwap"],
+    )
+
+
+@app.post("/api/backtest")
+@login_required
+def api_run_backtest():
+    """
+    Run a historical strategy backtest.
+    Simulation-only — never places live or paper orders.
+    """
+    from trading_agent.backtester import BacktestConfig, NexoBacktester
+
+    data = request.get_json(silent=True) or {}
+
+    raw_symbols = str(data.get("symbols", "")).strip()
+    symbols = [normalize_symbol(s.strip()) for s in raw_symbols.split(",") if s.strip()]
+    if not symbols:
+        return jsonify({"error": "At least one symbol is required"}), 400
+    if len(symbols) > 10:
+        return jsonify({"error": "Maximum 10 symbols per backtest"}), 400
+
+    strategy = str(data.get("strategy", "sma_crossover"))
+    if strategy not in ("sma_crossover", "rsi", "vwap"):
+        return jsonify({"error": f"Unknown strategy '{strategy}'"}), 400
+
+    try:
+        date_from = str(data.get("date_from", "")).strip() or None
+        date_to   = str(data.get("date_to", "")).strip() or None
+        initial_capital  = float(data.get("initial_capital", 10000))
+        commission_pct   = float(data.get("commission_pct", 0.001))
+        slippage_pct     = float(data.get("slippage_pct", 0.0005))
+        max_position_pct = float(data.get("max_position_pct", 0.20))
+        sma_short        = int(data.get("sma_short", 5))
+        sma_long         = int(data.get("sma_long", 20))
+        rsi_period       = int(data.get("rsi_period", 14))
+        rsi_oversold     = float(data.get("rsi_oversold", 30.0))
+        rsi_overbought   = float(data.get("rsi_overbought", 70.0))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": f"Invalid parameter: {exc}"}), 400
+
+    # Guard against unreasonable values
+    initial_capital  = max(100.0, min(initial_capital, 1_000_000.0))
+    commission_pct   = max(0.0, min(commission_pct, 0.05))
+    slippage_pct     = max(0.0, min(slippage_pct, 0.05))
+    max_position_pct = max(0.01, min(max_position_pct, 1.0))
+
+    cfg = BacktestConfig(
+        symbols=symbols,
+        strategy=strategy,
+        date_from=date_from or "",
+        date_to=date_to or "",
+        initial_capital=initial_capital,
+        commission_pct=commission_pct,
+        slippage_pct=slippage_pct,
+        max_position_pct=max_position_pct,
+        sma_short=sma_short,
+        sma_long=sma_long,
+        rsi_period=rsi_period,
+        rsi_oversold=rsi_oversold,
+        rsi_overbought=rsi_overbought,
+    )
+
+    try:
+        result = NexoBacktester(cfg).run()
+        return jsonify({"ok": True, "result": result.to_dict()})
+    except Exception as exc:
+        logger.exception("Backtest run failed")
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 500
+
+
+@app.post("/api/optimize")
+@login_required
+def api_run_optimizer():
+    """
+    Run strategy parameter optimization (grid search + optional walk-forward).
+    Simulation-only — never places live or paper orders.
+    """
+    from trading_agent.optimizer import OptimizeConfig, StrategyOptimizer
+
+    data = request.get_json(silent=True) or {}
+
+    raw_symbols = str(data.get("symbols", "")).strip()
+    symbols = [normalize_symbol(s.strip()) for s in raw_symbols.split(",") if s.strip()]
+    if not symbols:
+        return jsonify({"error": "At least one symbol is required"}), 400
+    if len(symbols) > 5:
+        return jsonify({"error": "Maximum 5 symbols for optimization"}), 400
+
+    strategy = str(data.get("strategy", "sma_crossover"))
+    if strategy not in ("sma_crossover", "rsi", "vwap"):
+        return jsonify({"error": f"Unknown strategy '{strategy}'"}), 400
+
+    try:
+        date_from        = str(data.get("date_from", "")).strip() or ""
+        date_to          = str(data.get("date_to", "")).strip() or ""
+        initial_capital  = float(data.get("initial_capital", 10000))
+        walk_forward     = bool(data.get("walk_forward", True))
+        rank_by          = str(data.get("rank_by", "sharpe_ratio"))
+        max_workers      = min(int(data.get("max_workers", 4)), 8)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": f"Invalid parameter: {exc}"}), 400
+
+    if rank_by not in ("sharpe_ratio", "total_return_pct", "win_rate"):
+        rank_by = "sharpe_ratio"
+
+    cfg = OptimizeConfig(
+        symbols=symbols,
+        strategy=strategy,
+        date_from=date_from,
+        date_to=date_to,
+        initial_capital=max(100.0, min(initial_capital, 1_000_000.0)),
+        walk_forward=walk_forward,
+        rank_by=rank_by,
+        max_workers=max_workers,
+        top_n=10,
+    )
+
+    try:
+        result = StrategyOptimizer(cfg).run()
+        return jsonify({"ok": True, "result": result.to_dict()})
+    except Exception as exc:
+        logger.exception("Optimizer run failed")
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 500
+
+
+@app.get("/api/backtest/runs")
+@login_required
+def api_backtest_runs():
+    """List recent backtest runs from Supabase."""
+    limit = min(int(request.args.get("limit", 20) or 20), 100)
+    runs = list_backtest_runs(limit)
+    return jsonify({"status": "ok", "runs": runs})
 
 
 @app.cli.command("hash-password")

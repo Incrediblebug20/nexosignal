@@ -5,7 +5,7 @@ exception is raised with a human-readable reason.
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
 from . import config
 
@@ -20,6 +20,9 @@ class DailyTracker:
     _date: date = field(default_factory=date.today)
     trade_count: int = 0
     realized_pnl: float = 0.0  # negative = loss
+    guard_strikes: int = 0
+    circuit_breaker_active: bool = False
+    circuit_breaker_reason: str | None = None
 
     def _maybe_reset(self):
         today = date.today()
@@ -27,11 +30,21 @@ class DailyTracker:
             self._date = today
             self.trade_count = 0
             self.realized_pnl = 0.0
+            self.guard_strikes = 0
+            self.circuit_breaker_active = False
+            self.circuit_breaker_reason = None
 
     def record_trade(self, pnl: float = 0.0):
         self._maybe_reset()
         self.trade_count += 1
         self.realized_pnl += pnl
+
+    def record_guard_strike(self, reason: str) -> None:
+        self._maybe_reset()
+        self.guard_strikes += 1
+        if self.trade_count >= 2 and self.guard_strikes >= config.MAX_GUARD_STRIKES:
+            self.circuit_breaker_active = True
+            self.circuit_breaker_reason = reason
 
     @property
     def trades_today(self) -> int:
@@ -125,6 +138,113 @@ def check_order(
     # (Alpaca's transfer endpoints are simply never called in broker.py,
     #  but this check exists as an explicit documented guardrail.)
     # Nothing to check here for a normal order — the broker layer enforces it.
+
+
+@dataclass(frozen=True)
+class GuardDecision:
+    allowed: bool
+    reason: str | None = None
+    circuit_breaker_active: bool = False
+    strikes: int = 0
+
+
+def require_live_execution_enabled(
+    *,
+    market_open: bool,
+    buying_power_verified: bool,
+    supabase_healthy: bool,
+    risk_checks_passed: bool,
+    circuit_breaker_active: bool,
+) -> GuardDecision:
+    """Hard gate for any live autonomous order path."""
+    failures: list[str] = []
+    if not config.LIVE_TRADING:
+        failures.append("LIVE_TRADING is not true")
+    if not config.AUTONOMOUS_TRADING:
+        failures.append("AUTONOMOUS_TRADING is not true")
+    if config.REQUIRE_MANUAL_APPROVAL:
+        failures.append("manual approval is required")
+    if config.ALPACA_PAPER or config.TRADING_MODE == "paper":
+        failures.append("Alpaca paper mode is enabled")
+    if not market_open:
+        failures.append("market is closed")
+    if not buying_power_verified:
+        failures.append("buying power cannot be verified")
+    if not supabase_healthy:
+        failures.append("Supabase persistence is not healthy")
+    if not risk_checks_passed:
+        failures.append("risk checks did not pass")
+    if circuit_breaker_active:
+        failures.append("circuit breaker active")
+    return GuardDecision(not failures, "; ".join(failures) if failures else None, circuit_breaker_active, get_tracker().guard_strikes)
+
+
+def check_autonomous_trade_requirements(
+    *,
+    confluence_score: float,
+    risk_reward_ratio: float,
+    atr: float,
+    liquidity_valid: bool,
+    stale_data: bool,
+    buying_power_verified: bool,
+    market_open: bool,
+    supabase_healthy: bool,
+    live_autonomous_mode: bool,
+    circuit_breaker_active: bool | None = None,
+) -> GuardDecision:
+    tracker = get_tracker()
+    breaker = tracker.circuit_breaker_active if circuit_breaker_active is None else circuit_breaker_active
+    failures: list[str] = []
+    if breaker:
+        failures.append("circuit breaker active")
+    if confluence_score < config.SIGNAL_MIN_CONFIDENCE:
+        failures.append(f"confluence below {config.SIGNAL_MIN_CONFIDENCE:.0f}")
+    if risk_reward_ratio + 1e-6 < config.MIN_RISK_REWARD_RATIO:
+        failures.append(f"reward/risk below {config.MIN_RISK_REWARD_RATIO:.1f}:1")
+    if atr <= 0:
+        failures.append("missing ATR")
+    if not liquidity_valid:
+        failures.append("liquidity invalid")
+    if stale_data:
+        failures.append("stale data detected")
+    if not buying_power_verified:
+        failures.append("buying power cannot be verified")
+    if not market_open:
+        failures.append("market closed")
+    if live_autonomous_mode and not supabase_healthy:
+        failures.append("Supabase persistence failed during live autonomous mode")
+
+    if failures:
+        reason = "; ".join(failures)
+        tracker.record_guard_strike(reason)
+        return GuardDecision(False, reason, tracker.circuit_breaker_active, tracker.guard_strikes)
+    return GuardDecision(True, None, tracker.circuit_breaker_active, tracker.guard_strikes)
+
+
+def is_data_stale(timestamp: datetime | None, max_age_seconds: int | None = None) -> bool:
+    if timestamp is None:
+        return True
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+    return age > (max_age_seconds or config.MAX_DATA_STALENESS_SECONDS)
+
+
+def break_even_stop_update(entry: float, current_price: float, atr: float, side: Literal["buy", "sell"] = "buy") -> tuple[bool, float]:
+    if atr <= 0:
+        return False, entry
+    if side == "buy" and current_price >= entry + (2 * atr):
+        return True, entry
+    if side == "sell" and current_price <= entry - (2 * atr):
+        return True, entry
+    return False, entry
+
+
+def trigger_circuit_breaker(reason: str) -> GuardDecision:
+    tracker = get_tracker()
+    tracker.circuit_breaker_active = True
+    tracker.circuit_breaker_reason = reason
+    return GuardDecision(False, reason, True, tracker.guard_strikes)
 
 
 def assert_no_transfer(action: str):
